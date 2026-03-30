@@ -69,6 +69,7 @@ export interface SessionConfigPatch {
   allowedTools?: string[];
   deniedTools?: string[];
   profile?: string;
+  status?: SessionStatus;
 }
 
 export interface SessionFilter {
