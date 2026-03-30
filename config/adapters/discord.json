@@ -1,0 +1,7 @@
+{
+  "enabled": true,
+  "token": "${DISCORD_BOT_TOKEN}",
+  "messageLimits": {
+    "maxLength": 2000
+  }
+}
