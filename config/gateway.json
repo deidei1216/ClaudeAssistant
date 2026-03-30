@@ -1,11 +1,11 @@
 {
   "name": "Agent Gateway",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "defaults": {
     "model": "sonnet",
-    "permissionMode": "auto"
+    "permissionMode": "auto",
+    "workingDirectory": "."
   },
-  "workingDirectory": ".",
   "limits": {
     "maxConcurrentSessions": 10,
     "sessionTimeout": 3600000,

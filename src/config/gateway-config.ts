@@ -16,13 +16,14 @@ const gatewayConfigSchema = z.object({
   defaults: z
     .object({
       model: z.string().default('sonnet'),
-      permissionMode: permissionModeSchema.default('auto')
+      permissionMode: permissionModeSchema.default('auto'),
+      workingDirectory: z.string().default('.')
     })
     .default({
       model: 'sonnet',
-      permissionMode: 'auto'
+      permissionMode: 'auto',
+      workingDirectory: '.'
     }),
-  workingDirectory: z.string().default('.'),
   limits: z
     .object({
       maxConcurrentSessions: z.number().int().positive().default(10),

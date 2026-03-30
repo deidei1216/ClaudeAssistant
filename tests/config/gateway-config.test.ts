@@ -31,8 +31,12 @@ describe('loadGatewayConfig', () => {
 
       expect(config.defaults.model).toBe('sonnet');
       expect(config.defaults.permissionMode).toBe('auto');
+      expect(config.defaults.workingDirectory).toBe('.');
       expect(config.limits.maxConcurrentSessions).toBe(10);
+      expect(config.limits.sessionTimeout).toBe(3_600_000);
+      expect(config.limits.maxTriggersPerSession).toBe(50);
       expect(config.logging.level).toBe('info');
+      expect(config.logging.file).toBe('logs/gateway.log');
     } finally {
       await rm(tempDir, { recursive: true, force: true });
     }
