@@ -1,0 +1,44 @@
+# ClaudeAssistant Agent Gateway
+
+This service connects Discord channels to Claude Code CLI while keeping one session per channel.
+
+## Prerequisites
+
+- Node.js 18.18 or newer
+- `claude` CLI installed and authenticated
+- A Discord bot token with message-content intent enabled
+
+## Setup
+
+```bash
+npm install
+cp .env.example .env
+```
+
+Update `config/gateway.json` and `config/adapters/discord.json` if you need different defaults.
+
+## Commands
+
+- `/model <name>` switches the model for the current channel session.
+- `/cd <path>` changes the Claude working directory for the current channel session.
+- `/profile <name>` loads a JSON profile from `profiles/`.
+- `/status` prints the current session state.
+- `/help` lists the built-in commands.
+
+## Run
+
+```bash
+npm run dev
+```
+
+## Test
+
+```bash
+npm test
+```
+
+## Build
+
+```bash
+npm run build
+```
