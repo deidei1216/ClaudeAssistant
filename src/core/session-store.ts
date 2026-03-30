@@ -36,8 +36,11 @@ export class SessionStore {
     const filePath = this.getPath(channelType, channelId);
     try {
       return deserialize(readFileSync(filePath, 'utf8'));
-    } catch {
-      return null;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return null; // Expected: file doesn't exist
+      }
+      throw error; // Unexpected: rethrow (e.g., permission denied, corrupt JSON)
     }
   }
 
@@ -53,8 +56,11 @@ export class SessionStore {
           return readdirSync(dir).map((file) => deserialize(readFileSync(join(dir, file), 'utf8')));
         })
         .sort((left, right) => right.lastActiveAt.getTime() - left.lastActiveAt.getTime());
-    } catch {
-      return [];
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return []; // Expected: base directory doesn't exist yet
+      }
+      throw error; // Unexpected: rethrow (e.g., permission denied, corrupt JSON)
     }
   }
 
