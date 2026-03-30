@@ -43,6 +43,16 @@ async function main(): Promise<void> {
 
   await gateway.start();
   logger.info('Agent Gateway started.');
+
+  // Graceful shutdown handlers
+  const shutdown = async () => {
+    logger.info('Shutting down...');
+    await gateway.stop();
+    process.exit(0);
+  };
+
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
 }
 
 main().catch((error) => {
