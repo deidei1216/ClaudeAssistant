@@ -1,0 +1,6 @@
+{
+  "name": "default",
+  "description": "Default chat profile",
+  "model": "sonnet",
+  "permissionMode": "auto"
+}
