@@ -1,0 +1,21 @@
+{
+  "name": "Agent Gateway",
+  "version": "0.1.0",
+  "defaults": {
+    "model": "sonnet",
+    "permissionMode": "auto"
+  },
+  "workingDirectory": ".",
+  "limits": {
+    "maxConcurrentSessions": 10,
+    "sessionTimeout": 3600000,
+    "maxTriggersPerSession": 50
+  },
+  "enabledAdapters": [
+    "discord"
+  ],
+  "logging": {
+    "level": "info",
+    "file": "logs/gateway.log"
+  }
+}
