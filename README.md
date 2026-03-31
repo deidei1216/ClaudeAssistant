@@ -54,3 +54,5 @@ The gateway now keeps a second state path for subagent display and operator cont
   - `npm run control:upsert-run -- --base-dir data/control ...`
   - `npm run control:request -- --base-dir data/control ...`
   - `npm run control:poll -- --base-dir data/control ...`
+- Control semantics are channel-agnostic: adapters normalize reactions, replies, buttons, or commands into the same control signal names.
+- Discord is the first implementation, but other adapters can emit the same `approve`, `reject`, `hold`, `adjust`, and `resume` meanings.

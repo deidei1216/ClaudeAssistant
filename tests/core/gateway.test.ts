@@ -490,4 +490,44 @@ describe('AgentGateway', () => {
     await gateway.stop();
     expect(controlSync.stop).toHaveBeenCalled();
   });
+
+  it('keeps normal chat routing intact while also accepting control input', async () => {
+    const onControlInput = vi.fn();
+    const adapter: ChannelAdapter = {
+      type: 'discord',
+      name: 'Discord',
+      onMessage: vi.fn(),
+      onControlInput,
+      send: vi.fn().mockResolvedValue({ messageId: '1', success: true }),
+      initialize: vi.fn(),
+      connect: vi.fn(),
+      disconnect: vi.fn()
+    };
+    const controlRouter = { resolve: vi.fn().mockReturnValue(null) };
+    const controlSync = { start: vi.fn(), stop: vi.fn() };
+    const commandHandler = {
+      executeFromMessage: vi.fn().mockResolvedValue({ success: true, message: 'Done.' })
+    };
+    const orchestrator = {
+      getOrCreateSession: vi.fn().mockReturnValue(createSession()),
+      execute: vi.fn().mockResolvedValue({ content: 'Claude response' })
+    };
+    const gateway = new AgentGateway({
+      adapters: [adapter],
+      commandHandler: commandHandler as unknown as CommandHandler,
+      orchestrator: orchestrator as unknown as {
+        getOrCreateSession: (channelId: string, channelType: string) => SessionProfile;
+        execute: (sessionId: string, message: AgentMessage) => Promise<{ content: string }>;
+      },
+      controlRouter: controlRouter as { resolve: (input: ChannelControlInput) => unknown },
+      controlSync: controlSync as { start: () => void; stop: () => void },
+      logger: { info: vi.fn(), error: vi.fn() }
+    });
+
+    await gateway.handleMessage(adapter, createMessage('normal chat'));
+
+    expect(orchestrator.execute).toHaveBeenCalledTimes(1);
+    expect(orchestrator.execute).toHaveBeenCalledWith('session-1', expect.objectContaining({ content: 'normal chat' }));
+    expect(controlRouter.resolve).not.toHaveBeenCalled();
+  });
 });
