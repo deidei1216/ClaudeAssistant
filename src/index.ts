@@ -5,6 +5,9 @@ import { DiscordAdapter } from './adapters';
 import { CommandHandler } from './commands';
 import { buildBuiltInCommands } from './commands/built-in/help';
 import { loadGatewayConfig } from './config/gateway-config';
+import { ControlRouter } from './core/control-router';
+import { ControlStore } from './core/control-store';
+import { ControlSync } from './core/control-sync';
 import { AgentGateway } from './core/gateway';
 import { SessionOrchestrator } from './core/orchestrator';
 import { ProfileManager } from './core/profile-manager';
@@ -34,10 +37,21 @@ async function main(): Promise<void> {
 
   buildBuiltInCommands(commandHandler);
 
+  const controlStore = new ControlStore(config.control.baseDir);
+  const controlRouter = new ControlRouter(controlStore);
+  const controlSync = new ControlSync({
+    adapters: [adapter],
+    controlStore,
+    logger,
+    intervalMs: config.control.syncIntervalMs
+  });
+
   const gateway = new AgentGateway({
     adapters: [adapter],
     commandHandler,
     orchestrator,
+    controlRouter,
+    controlSync,
     logger
   });
 

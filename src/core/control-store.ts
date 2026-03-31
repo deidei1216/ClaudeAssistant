@@ -2,7 +2,7 @@ import { mkdirSync, readFileSync, readdirSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { AgentRun, ChannelProjection, ControlRequest, ControlSignal } from './types';
 
-function serializeDateRecord<T extends Record<string, unknown>>(value: T): string {
+function serializeDateRecord<T extends object>(value: T): string {
   return JSON.stringify(
     value,
     (_key, current) => (current instanceof Date ? current.toISOString() : current),

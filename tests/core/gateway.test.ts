@@ -3,6 +3,7 @@ import { AgentGateway } from '../../src/core/gateway';
 import { ChannelAdapter } from '../../src/core/adapter';
 import { AgentMessage, SessionProfile } from '../../src/core/types';
 import { CommandHandler } from '../../src/commands';
+import { ChannelControlInput } from '../../src/core/types';
 
 describe('AgentGateway', () => {
   // Helper to create a default session
@@ -430,5 +431,63 @@ describe('AgentGateway', () => {
         replyTo: 'msg-1'
       })
     );
+  });
+
+  it('registers control callbacks and routes a control input through the control router', async () => {
+    const onControlInput = vi.fn();
+    const adapter: ChannelAdapter = {
+      type: 'discord',
+      name: 'Discord',
+      onMessage: vi.fn(),
+      onControlInput,
+      send: vi.fn().mockResolvedValue({ messageId: '1', success: true }),
+      initialize: vi.fn(),
+      connect: vi.fn(),
+      disconnect: vi.fn()
+    };
+    const controlRouter = { resolve: vi.fn().mockReturnValue(null) };
+    const controlSync = { start: vi.fn(), stop: vi.fn() };
+    const commandHandler = {
+      executeFromMessage: vi.fn()
+    };
+    const orchestrator = {
+      getOrCreateSession: vi.fn(),
+      execute: vi.fn()
+    };
+    const gateway = new AgentGateway({
+      adapters: [adapter],
+      commandHandler: commandHandler as unknown as CommandHandler,
+      orchestrator: orchestrator as unknown as {
+        getOrCreateSession: (channelId: string, channelType: string) => SessionProfile;
+        execute: (sessionId: string, message: AgentMessage) => Promise<{ content: string }>;
+      },
+      controlRouter: controlRouter as { resolve: (input: ChannelControlInput) => unknown },
+      controlSync: controlSync as { start: () => void; stop: () => void },
+      logger: { info: vi.fn(), error: vi.fn() }
+    });
+
+    await gateway.start();
+
+    expect(adapter.onControlInput).toHaveBeenCalledTimes(1);
+    expect(controlSync.start).toHaveBeenCalled();
+
+    // Simulate control input callback being invoked
+    const controlCallback = onControlInput.mock.calls[0]?.[0] as ((input: ChannelControlInput) => void) | undefined;
+    const input: ChannelControlInput = {
+      channelType: 'discord',
+      channelId: 'channel-1',
+      messageId: 'msg-1',
+      signal: 'approve',
+      userId: 'user-1',
+      interactionType: 'reaction',
+      rawValue: '👍',
+      timestamp: new Date('2026-03-31T01:30:00.000Z')
+    };
+    controlCallback?.(input);
+
+    expect(controlRouter.resolve).toHaveBeenCalledWith(input);
+
+    await gateway.stop();
+    expect(controlSync.stop).toHaveBeenCalled();
   });
 });

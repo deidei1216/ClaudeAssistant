@@ -1,5 +1,5 @@
 import { ChannelAdapter } from './adapter';
-import { AgentMessage } from './types';
+import { AgentMessage, ChannelControlInput } from './types';
 import { SessionOrchestrator } from './orchestrator';
 import { CommandHandler } from '../commands';
 import { CommandContext } from '../commands/types';
@@ -8,6 +8,13 @@ interface GatewayOptions {
   adapters: ChannelAdapter[];
   commandHandler: CommandHandler;
   orchestrator: SessionOrchestrator;
+  controlRouter?: {
+    resolve: (input: ChannelControlInput) => unknown;
+  };
+  controlSync?: {
+    start: () => void;
+    stop: () => void;
+  };
   logger: {
     info: (message: string, data?: unknown) => void;
     error: (message: string, data?: unknown) => void;
@@ -25,11 +32,16 @@ export class AgentGateway {
       adapter.onMessage((message) => {
         void this.processIncomingMessage(adapter, message);
       });
+      adapter.onControlInput?.((input) => {
+        this.options.controlRouter?.resolve(input);
+      });
       await adapter.connect();
     }
+    this.options.controlSync?.start();
   }
 
   async stop(): Promise<void> {
+    this.options.controlSync?.stop();
     await Promise.all(this.options.adapters.map((adapter) => adapter.disconnect()));
   }
 
