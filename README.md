@@ -42,3 +42,15 @@ npm test
 ```bash
 npm run build
 ```
+
+## Control Layer
+
+The gateway now keeps a second state path for subagent display and operator control.
+
+- Normal chat messages still route into Claude sessions.
+- Control requests are stored under `data/control/`.
+- Discord threads can display subagent progress and pending approval prompts.
+- Claude-side hooks/skills can use:
+  - `npm run control:upsert-run -- --base-dir data/control ...`
+  - `npm run control:request -- --base-dir data/control ...`
+  - `npm run control:poll -- --base-dir data/control ...`
