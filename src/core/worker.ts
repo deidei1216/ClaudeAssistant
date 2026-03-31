@@ -1,6 +1,22 @@
 import { spawn } from 'node:child_process';
 import { AgentExecutor, AgentMessage, AgentResponse, SessionProfile } from './types';
 
+export class ClaudeExecutionError extends Error {
+  constructor(
+    message: string,
+    readonly details: {
+      args: string[];
+      cwd: string;
+      exitCode: number;
+      stdout: string;
+      stderr: string;
+    }
+  ) {
+    super(message);
+    this.name = 'ClaudeExecutionError';
+  }
+}
+
 export type CommandRunner = (
   command: string,
   args: string[],
@@ -40,15 +56,10 @@ export class ClaudeCodeWorker implements AgentExecutor {
   constructor(private readonly runner: CommandRunner = defaultRunner) {}
 
   async execute(session: SessionProfile, message: AgentMessage): Promise<AgentResponse> {
-    const args = [
-      '--print',
-      '--session-id',
-      session.id,
-      '--model',
-      session.model,
-      '--permission-mode',
-      session.permissionMode
-    ];
+    const args = ['--print'];
+    const sessionFlag = session.messageCount > 0 ? '--resume' : '--session-id';
+
+    args.push(sessionFlag, session.id, '--model', session.model, '--permission-mode', session.permissionMode);
 
     if (session.settingsPath) {
       args.push('--settings', session.settingsPath);
@@ -71,7 +82,13 @@ export class ClaudeCodeWorker implements AgentExecutor {
     const result = await this.runner('claude', args, { cwd: session.workingDirectory });
 
     if (result.exitCode !== 0) {
-      throw new Error(result.stderr || `claude exited with status ${result.exitCode}`);
+      throw new ClaudeExecutionError(result.stderr || `claude exited with status ${result.exitCode}`, {
+        args,
+        cwd: session.workingDirectory,
+        exitCode: result.exitCode,
+        stdout: result.stdout,
+        stderr: result.stderr
+      });
     }
 
     return {

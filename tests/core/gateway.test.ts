@@ -3,7 +3,6 @@ import { AgentGateway } from '../../src/core/gateway';
 import { ChannelAdapter } from '../../src/core/adapter';
 import { AgentMessage, SessionProfile } from '../../src/core/types';
 import { CommandHandler } from '../../src/commands';
-import { CommandContext } from '../../src/commands/types';
 
 describe('AgentGateway', () => {
   // Helper to create a default session
@@ -258,5 +257,178 @@ describe('AgentGateway', () => {
 
     expect(adapter1.disconnect).toHaveBeenCalled();
     expect(adapter2.disconnect).toHaveBeenCalled();
+  });
+
+  it('serializes messages for the same channel session', async () => {
+    const adapter: ChannelAdapter = {
+      type: 'discord',
+      name: 'Discord',
+      onMessage: vi.fn(),
+      send: vi.fn().mockResolvedValue({ messageId: '1', success: true }),
+      initialize: vi.fn(),
+      connect: vi.fn(),
+      disconnect: vi.fn()
+    };
+    const commandHandler = {
+      executeFromMessage: vi.fn()
+    };
+
+    let resolveFirst!: (value: { content: string; replyTo?: string }) => void;
+    const execute = vi
+      .fn()
+      .mockImplementationOnce(
+        () =>
+          new Promise<{ content: string; replyTo?: string }>((resolve) => {
+            resolveFirst = resolve;
+          })
+      )
+      .mockResolvedValueOnce({ content: 'second response', replyTo: 'msg-2' });
+
+    const orchestrator = {
+      getOrCreateSession: vi.fn().mockReturnValue(createSession()),
+      execute
+    };
+    const gateway = new AgentGateway({
+      adapters: [adapter],
+      commandHandler: commandHandler as unknown as CommandHandler,
+      orchestrator: orchestrator as unknown as {
+        getOrCreateSession: (channelId: string, channelType: string) => SessionProfile;
+        execute: (sessionId: string, message: AgentMessage) => Promise<{ content: string; replyTo?: string }>;
+      },
+      logger: { info: vi.fn(), error: vi.fn() }
+    });
+
+    const first = gateway.handleMessage(adapter, createMessage('first', { id: 'msg-1' }));
+    await Promise.resolve();
+    await Promise.resolve();
+    const second = gateway.handleMessage(adapter, createMessage('second', { id: 'msg-2' }));
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(execute).toHaveBeenCalledTimes(1);
+
+    resolveFirst({ content: 'first response', replyTo: 'msg-1' });
+    await first;
+    await second;
+
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect(execute).toHaveBeenNthCalledWith(1, 'session-1', expect.objectContaining({ id: 'msg-1' }));
+    expect(execute).toHaveBeenNthCalledWith(2, 'session-1', expect.objectContaining({ id: 'msg-2' }));
+  });
+
+  it('keeps Discord typing active while waiting for a Claude response', async () => {
+    vi.useFakeTimers();
+
+    const adapter: ChannelAdapter = {
+      type: 'discord',
+      name: 'Discord',
+      onMessage: vi.fn(),
+      send: vi.fn().mockResolvedValue({ messageId: '1', success: true }),
+      typing: vi.fn().mockResolvedValue(undefined),
+      initialize: vi.fn(),
+      connect: vi.fn(),
+      disconnect: vi.fn()
+    };
+    const commandHandler = {
+      executeFromMessage: vi.fn()
+    };
+
+    let resolveResponse!: (value: { content: string; replyTo?: string }) => void;
+    const execute = vi.fn().mockImplementation(
+      () =>
+        new Promise<{ content: string; replyTo?: string }>((resolve) => {
+          resolveResponse = resolve;
+        })
+    );
+    const orchestrator = {
+      getOrCreateSession: vi.fn().mockReturnValue(createSession()),
+      execute
+    };
+    const gateway = new AgentGateway({
+      adapters: [adapter],
+      commandHandler: commandHandler as unknown as CommandHandler,
+      orchestrator: orchestrator as unknown as {
+        getOrCreateSession: (channelId: string, channelType: string) => SessionProfile;
+        execute: (sessionId: string, message: AgentMessage) => Promise<{ content: string; replyTo?: string }>;
+      },
+      logger: { info: vi.fn(), error: vi.fn() }
+    });
+
+    const pending = gateway.handleMessage(adapter, createMessage('hello world'));
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(adapter.typing).toHaveBeenCalledTimes(1);
+
+    await vi.advanceTimersByTimeAsync(8000);
+    expect(adapter.typing).toHaveBeenCalledTimes(2);
+
+    resolveResponse({ content: 'Claude response', replyTo: 'msg-1' });
+    await pending;
+    await vi.advanceTimersByTimeAsync(8000);
+
+    expect(adapter.typing).toHaveBeenCalledTimes(2);
+    vi.useRealTimers();
+  });
+
+  it('logs the full error payload and sends a fallback message when handling fails', async () => {
+    const onMessage = vi.fn();
+    const adapter: ChannelAdapter = {
+      type: 'discord',
+      name: 'Discord',
+      onMessage,
+      send: vi.fn().mockResolvedValue({ messageId: '1', success: true }),
+      initialize: vi.fn(),
+      connect: vi.fn(),
+      disconnect: vi.fn()
+    };
+    const commandHandler = {
+      executeFromMessage: vi.fn()
+    };
+    const failure = Object.assign(new Error('claude failed'), {
+      stdout: 'partial output',
+      stderr: 'permission denied',
+      exitCode: 1
+    });
+    const orchestrator = {
+      getOrCreateSession: vi.fn().mockReturnValue(createSession()),
+      execute: vi.fn().mockRejectedValue(failure)
+    };
+    const logger = { info: vi.fn(), error: vi.fn() };
+    const gateway = new AgentGateway({
+      adapters: [adapter],
+      commandHandler: commandHandler as unknown as CommandHandler,
+      orchestrator: orchestrator as unknown as {
+        getOrCreateSession: (channelId: string, channelType: string) => SessionProfile;
+        execute: (sessionId: string, message: AgentMessage) => Promise<{ content: string }>;
+      },
+      logger
+    });
+
+    await gateway.start();
+    const callback = onMessage.mock.calls[0]?.[0] as ((message: AgentMessage) => void) | undefined;
+    const message = createMessage('hello world');
+
+    callback?.(message);
+    await Promise.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(logger.error).toHaveBeenCalledWith(
+      'Message handling failed',
+      expect.objectContaining({
+        channelId: 'channel-1',
+        error: 'claude failed',
+        stack: expect.any(String),
+        stdout: 'partial output',
+        stderr: 'permission denied',
+        exitCode: 1
+      })
+    );
+    expect(adapter.send).toHaveBeenCalledWith(
+      'channel-1',
+      expect.objectContaining({
+        content: expect.stringContaining('claude failed'),
+        replyTo: 'msg-1'
+      })
+    );
   });
 });

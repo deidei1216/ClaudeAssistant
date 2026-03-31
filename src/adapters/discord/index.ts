@@ -77,4 +77,15 @@ export class DiscordAdapter implements ChannelAdapter {
 
     return { messageId: lastMessageId, success: true };
   }
+
+  async typing(channelId: string): Promise<void> {
+    const channel = await this.client.channels.fetch(channelId);
+    if (!channel || !channel.isTextBased()) {
+      return;
+    }
+
+    if ('sendTyping' in channel && typeof channel.sendTyping === 'function') {
+      await channel.sendTyping();
+    }
+  }
 }

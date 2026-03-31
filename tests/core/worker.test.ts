@@ -41,7 +41,7 @@ describe('ClaudeCodeWorker', () => {
       'claude',
       [
         '--print',
-        '--session-id',
+        '--resume',
         '9e0ef8e2-f9d7-4fb9-a261-4d35bc8b23eb',
         '--model',
         'opus',
