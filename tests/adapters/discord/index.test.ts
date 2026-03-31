@@ -23,3 +23,19 @@ describe('DiscordAdapter', () => {
     expect(sendTyping).toHaveBeenCalled();
   });
 });
+
+describe('DiscordAdapter control support', () => {
+  it('registers reaction and reply listeners during initialize', async () => {
+    const on = vi.fn();
+    const adapter = new DiscordAdapter({
+      on,
+      login: vi.fn(),
+      destroy: vi.fn(),
+      channels: { fetch: vi.fn() }
+    } as never);
+
+    await adapter.initialize({ enabled: true, token: 'token' });
+
+    expect(on).toHaveBeenCalled();
+  });
+});

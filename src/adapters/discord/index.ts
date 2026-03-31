@@ -1,7 +1,8 @@
 import { Client, Events, GatewayIntentBits, type TextChannel, type NewsChannel, type DMChannel, type ThreadChannel, type VoiceChannel } from 'discord.js';
 import type { AdapterConfig, ChannelAdapter, MessageResult } from '../../core/adapter';
-import type { AgentMessage, AgentResponse } from '../../core/types';
+import type { AgentMessage, AgentResponse, ChannelControlInput } from '../../core/types';
 import { fromDiscordMessage, toDiscordChunks } from './message-formatter';
+import { fromDiscordReaction, fromDiscordReply } from './control-input-mapper';
 
 type SendableChannel = TextChannel | NewsChannel | DMChannel | ThreadChannel | VoiceChannel;
 
@@ -16,6 +17,7 @@ export class DiscordAdapter implements ChannelAdapter {
   readonly name = 'Discord';
   readonly type = 'discord';
   private callback?: (message: AgentMessage) => void;
+  private controlCallback?: (input: ChannelControlInput) => void;
   private config?: DiscordAdapterConfig;
 
   constructor(
@@ -28,19 +30,57 @@ export class DiscordAdapter implements ChannelAdapter {
     this.config = config;
 
     this.client.on(Events.MessageCreate, (message) => {
-      if (message.author.bot || !this.callback) {
+      if (message.author.bot) {
         return;
       }
 
-      this.callback(
-        fromDiscordMessage({
-          id: message.id,
-          channelId: message.channelId,
-          author: { id: message.author.id, bot: message.author.bot },
-          content: message.content,
-          createdAt: message.createdAt
-        })
-      );
+      if (message.reference?.messageId && this.controlCallback) {
+        this.controlCallback(
+          fromDiscordReply({
+            id: message.id,
+            channelId: message.channelId,
+            threadId: message.channel?.isThread?.() ? message.channelId : undefined,
+            userId: message.author.id,
+            username: message.author.username,
+            content: message.content,
+            replyTo: message.reference.messageId,
+            createdAt: message.createdAt
+          })
+        );
+        return;
+      }
+
+      if (this.callback) {
+        this.callback(
+          fromDiscordMessage({
+            id: message.id,
+            channelId: message.channelId,
+            author: { id: message.author.id, bot: message.author.bot },
+            content: message.content,
+            createdAt: message.createdAt
+          })
+        );
+      }
+    });
+
+    this.client.on(Events.MessageReactionAdd, (reaction, user) => {
+      if (user.bot || !this.controlCallback) {
+        return;
+      }
+
+      const input = fromDiscordReaction({
+        emoji: { name: reaction.emoji.name },
+        messageId: reaction.message.id,
+        channelId: reaction.message.channelId,
+        threadId: reaction.message.channel.isThread?.() ? reaction.message.channelId : undefined,
+        userId: user.id,
+        username: 'discord-user',
+        createdAt: new Date()
+      });
+
+      if (input) {
+        this.controlCallback(input);
+      }
     });
   }
 
@@ -57,6 +97,34 @@ export class DiscordAdapter implements ChannelAdapter {
 
   onMessage(callback: (message: AgentMessage) => void): void {
     this.callback = callback;
+  }
+
+  onControlInput(callback: (input: ChannelControlInput) => void): void {
+    this.controlCallback = callback;
+  }
+
+  async createThread(channelId: string, title: string): Promise<MessageResult & { channelId: string }> {
+    const channel = await this.client.channels.fetch(channelId);
+    if (!channel || !channel.isTextBased() || !('threads' in channel)) {
+      return { channelId, messageId: '', success: false, error: `Channel ${channelId} cannot create threads.` };
+    }
+
+    const thread = await channel.threads.create({ name: title, autoArchiveDuration: 1440 });
+    return { channelId: thread.id, messageId: '', success: true };
+  }
+
+  async upsertControlMessage(channelId: string, response: AgentResponse, messageId?: string): Promise<MessageResult> {
+    if (messageId) {
+      return this.edit(messageId, response);
+    }
+
+    return this.send(channelId, response);
+  }
+
+  async edit(messageId: string, response: AgentResponse): Promise<MessageResult> {
+    // Note: This requires fetching the message from a channel, which requires channelId.
+    // For now, return a not-implemented error as this needs more context.
+    return { messageId, success: false, error: 'Edit requires channel context.' };
   }
 
   async send(channelId: string, response: AgentResponse): Promise<MessageResult> {
