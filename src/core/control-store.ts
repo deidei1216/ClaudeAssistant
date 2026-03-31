@@ -78,8 +78,12 @@ export class ControlStore {
     this.write('signals', signal.id, serializeDateRecord(signal));
   }
 
+  listSignalsForRequest(requestId: string): ControlSignal[] {
+    return this.list('signals', deserializeSignal).filter((s) => s.requestId === requestId);
+  }
+
   getLatestSignalForRequest(requestId: string): ControlSignal | null {
-    const signals = this.list('signals', deserializeSignal).filter((s) => s.requestId === requestId);
+    const signals = this.listSignalsForRequest(requestId);
     if (signals.length === 0) return null;
     return signals.reduce((latest, current) =>
       current.createdAt.getTime() > latest.createdAt.getTime() ? current : latest
