@@ -17,5 +17,10 @@
   "logging": {
     "level": "info",
     "file": "logs/gateway.log"
+  },
+  "control": {
+    "enabled": true,
+    "baseDir": "data/control",
+    "syncIntervalMs": 2000
   }
 }

@@ -41,4 +41,35 @@ describe('loadGatewayConfig', () => {
       await rm(tempDir, { recursive: true, force: true });
     }
   });
+
+  test('applies control defaults for omitted configuration fields', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'gateway-config-'));
+    const configDir = join(tempDir, 'config');
+    const configPath = join(configDir, 'gateway.json');
+
+    try {
+      await mkdir(configDir, { recursive: true });
+      await writeFile(
+        configPath,
+        JSON.stringify(
+          {
+            name: 'Agent Gateway',
+            version: '1.0.0',
+            enabledAdapters: ['discord']
+          },
+          null,
+          2
+        ),
+        'utf8'
+      );
+
+      const config = loadGatewayConfig(configPath);
+
+      expect(config.control.enabled).toBe(true);
+      expect(config.control.baseDir).toBe('data/control');
+      expect(config.control.syncIntervalMs).toBe(2000);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
 });

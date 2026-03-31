@@ -1,6 +1,12 @@
 export type PermissionMode = 'default' | 'auto' | 'plan' | 'bypassPermissions' | 'dontAsk' | 'acceptEdits';
 export type SessionStatus = 'active' | 'idle' | 'archived';
 
+export type AgentRunStatus = 'running' | 'waiting_control' | 'paused' | 'completed' | 'failed' | 'cancelled';
+export type ControlRequestKind = 'approval' | 'decision' | 'input';
+export type ControlRequestStatus = 'pending' | 'resolved' | 'expired' | 'cancelled';
+export type ControlSignalName = 'approve' | 'reject' | 'hold' | 'adjust' | 'resume';
+export type ChannelControlInputKind = 'reaction' | 'reply' | 'command' | 'button';
+
 export interface Attachment {
   id: string;
   name: string;
@@ -79,4 +85,86 @@ export interface SessionFilter {
 
 export interface AgentExecutor {
   execute(session: SessionProfile, message: AgentMessage): Promise<AgentResponse>;
+}
+
+export interface SourceMessageRef {
+  channelType: string;
+  channelId: string;
+  messageId: string;
+  threadId?: string;
+}
+
+export interface AgentRun {
+  id: string;
+  parentRunId?: string;
+  sessionId: string;
+  role?: string;
+  title: string;
+  status: AgentRunStatus;
+  channelBinding?: {
+    channelType: string;
+    channelId: string;
+    threadId?: string;
+  };
+  createdAt: Date;
+  updatedAt: Date;
+}
+
+export interface ControlRequest {
+  id: string;
+  runId: string;
+  kind: ControlRequestKind;
+  status: ControlRequestStatus;
+  summary: string;
+  details?: string;
+  requestedAt: Date;
+  resolvedAt?: Date;
+  sourceMessage?: SourceMessageRef;
+}
+
+export interface ControlSignal {
+  id: string;
+  requestId: string;
+  runId: string;
+  signal: ControlSignalName;
+  comment?: string;
+  actor: {
+    channelType: string;
+    userId: string;
+    username?: string;
+  };
+  source: {
+    channelType: string;
+    channelId: string;
+    messageId: string;
+    threadId?: string;
+    interactionType: ChannelControlInputKind;
+    rawValue: string;
+  };
+  createdAt: Date;
+}
+
+export interface ChannelProjection {
+  runId: string;
+  channelType: string;
+  channelId: string;
+  threadId?: string;
+  rootMessageId?: string;
+  lastStatusMessageId?: string;
+  title: string;
+  updatedAt: Date;
+}
+
+export interface ChannelControlInput {
+  channelType: string;
+  channelId: string;
+  messageId: string;
+  threadId?: string;
+  signal: ControlSignalName;
+  comment?: string;
+  userId: string;
+  username?: string;
+  interactionType: ChannelControlInputKind;
+  rawValue: string;
+  timestamp: Date;
 }

@@ -46,6 +46,17 @@ const gatewayConfigSchema = z.object({
     .default({
       level: 'info',
       file: 'logs/gateway.log'
+    }),
+  control: z
+    .object({
+      enabled: z.boolean().default(true),
+      baseDir: z.string().default('data/control'),
+      syncIntervalMs: z.number().int().positive().default(2000)
+    })
+    .default({
+      enabled: true,
+      baseDir: 'data/control',
+      syncIntervalMs: 2000
     })
 });
 
