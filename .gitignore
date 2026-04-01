@@ -4,4 +4,5 @@ dist
 .env
 logs
 data
-
+!*.md
+!**/*.md
