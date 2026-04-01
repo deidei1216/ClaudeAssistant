@@ -11,16 +11,45 @@ export interface ControlResolution {
 export class ControlRouter {
   constructor(
     private readonly store: ControlStore,
-    private readonly clock: () => Date = () => new Date()
+    private readonly clock: () => Date = () => new Date(),
+    private readonly logger: {
+      info?: (message: string, data?: unknown) => void;
+      warn?: (message: string, data?: unknown) => void;
+      error?: (message: string, data?: unknown) => void;
+    } = {}
   ) {}
 
   resolve(input: ChannelControlInput): ControlResolution | null {
-    const request = this.store.findPendingRequestBySourceMessage(input.channelType, input.messageId);
+    const request =
+      this.store.findPendingRequestBySourceMessage(input.channelType, input.messageId) ??
+      (input.threadId ? this.store.findPendingRequestByThreadId(input.channelType, input.threadId) : null);
     if (!request) {
+      this.log('warn', 'Control input did not match any pending request', {
+        channelType: input.channelType,
+        channelId: input.channelId,
+        messageId: input.messageId,
+        interactionType: input.interactionType,
+        rawValue: input.rawValue,
+        pendingRequests: this.store
+          .listRequests()
+          .filter((candidate) => candidate.status === 'pending')
+          .map((candidate) => ({
+            requestId: candidate.id,
+            runId: candidate.runId,
+            sourceMessageId: candidate.sourceMessage?.messageId,
+            sourceThreadId: candidate.sourceMessage?.threadId
+          }))
+      });
       return null;
     }
 
     if (this.store.listSignalsForRequest(request.id).some((signal) => signal.actor.userId === input.userId)) {
+      this.log('info', 'Ignoring duplicate control input from same user', {
+        requestId: request.id,
+        runId: request.runId,
+        userId: input.userId,
+        messageId: input.messageId
+      });
       return null;
     }
 
@@ -71,7 +100,22 @@ export class ControlRouter {
     this.store.saveSignal(signal);
     this.store.saveRun(nextRun);
     this.store.saveRequest(nextRequest);
+    this.log('info', 'Resolved control request from channel input', {
+      requestId: request.id,
+      runId: request.runId,
+      signal: input.signal,
+      channelId: input.channelId,
+      messageId: input.messageId,
+      threadId: input.threadId,
+      resolutionSource:
+        request.sourceMessage?.messageId === input.messageId ? 'message' : input.threadId ? 'thread' : 'message'
+    });
 
     return { run: nextRun, request: nextRequest, signal };
+  }
+
+  private log(level: 'info' | 'warn' | 'error', message: string, data: Record<string, unknown>): void {
+    const method = this.logger[level];
+    method?.call(this.logger, data, message);
   }
 }

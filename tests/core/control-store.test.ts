@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { mkdtempSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { ControlStore } from '../../src/core/control-store';
@@ -70,5 +70,55 @@ describe('ControlStore', () => {
     expect(store.findPendingRequestBySourceMessage('discord', 'message-1')?.id).toBe('request-1');
     expect(store.getLatestSignalForRequest('request-1')?.signal).toBe('approve');
     expect(store.getProjection('discord', 'run-1')?.threadId).toBe('thread-1');
+  });
+
+  it('finds a pending request by thread id only when it is unique within the thread', () => {
+    const baseDir = mkdtempSync(join(tmpdir(), 'control-store-'));
+    const store = new ControlStore(baseDir);
+
+    store.saveRequest({
+      id: 'request-1',
+      runId: 'run-1',
+      kind: 'approval',
+      status: 'pending',
+      summary: 'Approve code plan',
+      requestedAt: new Date('2026-03-31T00:01:00.000Z'),
+      sourceMessage: {
+        channelType: 'discord',
+        channelId: 'channel-1',
+        messageId: 'message-1',
+        threadId: 'thread-1'
+      }
+    });
+
+    expect(store.findPendingRequestByThreadId('discord', 'thread-1')?.id).toBe('request-1');
+
+    store.saveRequest({
+      id: 'request-2',
+      runId: 'run-2',
+      kind: 'approval',
+      status: 'pending',
+      summary: 'Approve test plan',
+      requestedAt: new Date('2026-03-31T00:02:00.000Z'),
+      sourceMessage: {
+        channelType: 'discord',
+        channelId: 'channel-1',
+        messageId: 'message-2',
+        threadId: 'thread-1'
+      }
+    });
+
+    expect(store.findPendingRequestByThreadId('discord', 'thread-1')).toBeNull();
+  });
+
+  it('throws parse errors for corrupt run files instead of pretending the run is missing', () => {
+    const baseDir = mkdtempSync(join(tmpdir(), 'control-store-'));
+    const store = new ControlStore(baseDir);
+    const runsDir = join(baseDir, 'runs');
+
+    mkdirSync(runsDir, { recursive: true });
+    writeFileSync(join(runsDir, 'run-bad.json'), '{ "id": "run-bad", "status": "running",、 }');
+
+    expect(() => store.getRun('run-bad')).toThrow();
   });
 });

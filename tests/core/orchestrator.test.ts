@@ -79,6 +79,39 @@ describe('SessionOrchestrator', () => {
       expect(executor.execute).toHaveBeenCalledTimes(1);
       expect(orchestrator.getSession(first.id)?.messageCount).toBe(1);
     });
+
+    it('recreates the Claude session and retries when resuming hits a corrupt JSON session error', async () => {
+      const first = orchestrator.getOrCreateSession('channel-1', 'discord');
+      store.save({
+        ...first,
+        messageCount: 1
+      });
+
+      const message: AgentMessage = {
+        id: 'msg-2',
+        channelId: 'channel-1',
+        channelType: 'discord',
+        userId: 'user-1',
+        content: 'hello again',
+        timestamp: clock()
+      };
+
+      const corruptResumeError = new Error('Unexpected token \'\', "\\u0001Bud1"... is not valid JSON');
+      vi.mocked(executor.execute)
+        .mockRejectedValueOnce(corruptResumeError)
+        .mockResolvedValueOnce({ content: 'recovered response' });
+
+      const response = await orchestrator.execute(first.id, message);
+      const replacement = orchestrator.getSessionByChannel('channel-1', 'discord');
+
+      expect(response.content).toBe('recovered response');
+      expect(executor.execute).toHaveBeenCalledTimes(2);
+      expect(vi.mocked(executor.execute).mock.calls[0][0].id).toBe(first.id);
+      expect(vi.mocked(executor.execute).mock.calls[1][0].id).not.toBe(first.id);
+      expect(vi.mocked(executor.execute).mock.calls[1][0].messageCount).toBe(0);
+      expect(replacement?.id).toBe(vi.mocked(executor.execute).mock.calls[1][0].id);
+      expect(replacement?.messageCount).toBe(1);
+    });
   });
 
   describe('getSession', () => {

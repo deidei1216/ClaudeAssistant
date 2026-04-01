@@ -414,7 +414,6 @@ describe('AgentGateway', () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
 
     expect(logger.error).toHaveBeenCalledWith(
-      'Message handling failed',
       expect.objectContaining({
         channelId: 'channel-1',
         error: 'claude failed',
@@ -422,7 +421,8 @@ describe('AgentGateway', () => {
         stdout: 'partial output',
         stderr: 'permission denied',
         exitCode: 1
-      })
+      }),
+      'Message handling failed'
     );
     expect(adapter.send).toHaveBeenCalledWith(
       'channel-1',
@@ -529,5 +529,60 @@ describe('AgentGateway', () => {
     expect(orchestrator.execute).toHaveBeenCalledTimes(1);
     expect(orchestrator.execute).toHaveBeenCalledWith('session-1', expect.objectContaining({ content: 'normal chat' }));
     expect(controlRouter.resolve).not.toHaveBeenCalled();
+  });
+
+  it('does not route plain messages from control projection threads into Claude sessions', async () => {
+    const adapter: ChannelAdapter = {
+      type: 'discord',
+      name: 'Discord',
+      onMessage: vi.fn(),
+      send: vi.fn().mockResolvedValue({ messageId: '1', success: true }),
+      initialize: vi.fn(),
+      connect: vi.fn(),
+      disconnect: vi.fn()
+    };
+    const commandHandler = {
+      executeFromMessage: vi.fn()
+    };
+    const orchestrator = {
+      getOrCreateSession: vi.fn().mockReturnValue(createSession({ id: 'thread-session', channelId: 'thread-1' })),
+      execute: vi.fn().mockResolvedValue({ content: 'Claude response' })
+    };
+    const gateway = new AgentGateway({
+      adapters: [adapter],
+      commandHandler: commandHandler as unknown as CommandHandler,
+      orchestrator: orchestrator as unknown as {
+        getOrCreateSession: (channelId: string, channelType: string) => SessionProfile;
+        execute: (sessionId: string, message: AgentMessage) => Promise<{ content: string }>;
+      },
+      controlStore: {
+        findProjectionByThreadId: vi.fn().mockReturnValue({
+          runId: 'run-1',
+          channelType: 'discord',
+          channelId: 'channel-1',
+          threadId: 'thread-1',
+          title: 'Architect Agent',
+          updatedAt: new Date('2026-03-31T13:00:00.000Z')
+        })
+      } as {
+        findProjectionByThreadId: (channelType: string, threadId: string) => unknown;
+      },
+      logger: { info: vi.fn(), error: vi.fn() }
+    });
+
+    await gateway.handleMessage(
+      adapter,
+      createMessage('继续', {
+        id: 'msg-thread-1',
+        channelId: 'thread-1'
+      })
+    );
+
+    expect(orchestrator.getOrCreateSession).not.toHaveBeenCalled();
+    expect(orchestrator.execute).not.toHaveBeenCalled();
+    expect(adapter.send).toHaveBeenCalledWith('thread-1', {
+      content: 'This thread is reserved for control updates. Reply to a control message instead of sending a new conversation message.',
+      replyTo: 'msg-thread-1'
+    });
   });
 });

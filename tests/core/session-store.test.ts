@@ -96,6 +96,29 @@ describe('SessionStore', () => {
     expect(store.list()).toEqual([]);
   });
 
+  it('list ignores non-json files in session directories', () => {
+    const baseDir = mkdtempSync(join(tmpdir(), 'session-store-'));
+    const store = new SessionStore(baseDir);
+
+    const session: SessionProfile = {
+      id: 'session-json-only',
+      channelId: 'channel-json-only',
+      channelType: 'discord',
+      model: 'sonnet',
+      workingDirectory: '.',
+      permissionMode: 'auto',
+      createdAt: new Date('2026-03-30T00:00:00.000Z'),
+      lastActiveAt: new Date('2026-03-30T00:00:00.000Z'),
+      status: 'active',
+      messageCount: 0
+    };
+
+    store.save(session);
+    writeFileSync(join(baseDir, 'discord', '.DS_Store'), Buffer.from([0x00, 0x00, 0x00, 0x01, 0x42, 0x75, 0x64, 0x31, 0x00, 0x00]));
+
+    expect(store.list()).toEqual([session]);
+  });
+
   it('multiple sessions can be saved and retrieved independently', () => {
     const baseDir = mkdtempSync(join(tmpdir(), 'session-store-'));
     const store = new SessionStore(baseDir);

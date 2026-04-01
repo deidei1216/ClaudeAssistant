@@ -23,7 +23,7 @@ async function main(): Promise<void> {
     ...discordFile,
     token: process.env.DISCORD_BOT_TOKEN ?? discordFile.token
   };
-  const adapter = new DiscordAdapter();
+  const adapter = new DiscordAdapter(undefined, logger);
 
   await adapter.initialize(discordConfig);
 
@@ -38,7 +38,7 @@ async function main(): Promise<void> {
   buildBuiltInCommands(commandHandler);
 
   const controlStore = new ControlStore(config.control.baseDir);
-  const controlRouter = new ControlRouter(controlStore);
+  const controlRouter = new ControlRouter(controlStore, undefined, logger);
   const controlSync = new ControlSync({
     adapters: [adapter],
     controlStore,
@@ -50,17 +50,18 @@ async function main(): Promise<void> {
     adapters: [adapter],
     commandHandler,
     orchestrator,
+    controlStore,
     controlRouter,
     controlSync,
     logger
   });
 
   await gateway.start();
-  logger.info('Agent Gateway started.');
+  logger.info({}, 'Agent Gateway started.');
 
   // Graceful shutdown handlers
   const shutdown = async () => {
-    logger.info('Shutting down...');
+    logger.info({}, 'Shutting down...');
     await gateway.stop();
     process.exit(0);
   };

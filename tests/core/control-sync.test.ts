@@ -154,4 +154,60 @@ describe('ControlSync', () => {
 
     vi.useRealTimers();
   });
+
+  it('does not create duplicate threads when syncOnce overlaps with itself', async () => {
+    const baseDir = mkdtempSync(join(tmpdir(), 'control-sync-overlap-'));
+    const store = new ControlStore(baseDir);
+
+    let resolveCreateThread!: (value: { channelId: string; messageId: string; success: boolean }) => void;
+    const createThread = vi.fn().mockImplementation(
+      () =>
+        new Promise<{ channelId: string; messageId: string; success: boolean }>((resolve) => {
+          resolveCreateThread = resolve;
+        })
+    );
+    const adapter = {
+      type: 'discord',
+      name: 'Discord',
+      createThread,
+      upsertControlMessage: vi.fn().mockResolvedValue({ messageId: 'status-1', success: true })
+    };
+
+    store.saveRun({
+      id: 'run-overlap',
+      sessionId: 'session-overlap',
+      title: 'Overlap run',
+      status: 'waiting_control',
+      channelBinding: {
+        channelType: 'discord',
+        channelId: 'channel-overlap'
+      },
+      createdAt: new Date('2026-03-31T01:30:00.000Z'),
+      updatedAt: new Date('2026-03-31T01:30:00.000Z')
+    });
+    store.saveRequest({
+      id: 'request-overlap',
+      runId: 'run-overlap',
+      kind: 'approval',
+      status: 'pending',
+      summary: 'Approve overlap plan',
+      requestedAt: new Date('2026-03-31T01:31:00.000Z')
+    });
+
+    const sync = new ControlSync({ adapters: [adapter as unknown as ChannelAdapter], controlStore: store, logger: console });
+
+    const first = sync.syncOnce();
+    const second = sync.syncOnce();
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(createThread).toHaveBeenCalledTimes(1);
+
+    resolveCreateThread({ channelId: 'thread-overlap', messageId: 'root-overlap', success: true });
+    await first;
+    await second;
+
+    expect(createThread).toHaveBeenCalledTimes(1);
+    expect(store.getProjection('discord', 'run-overlap')?.threadId).toBe('thread-overlap');
+  });
 });

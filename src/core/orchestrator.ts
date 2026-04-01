@@ -95,15 +95,27 @@ export class SessionOrchestrator {
 
   async execute(sessionId: string, message: AgentMessage): Promise<AgentResponse> {
     const session = this.requireSession(sessionId);
-    const response = await this.options.executor.execute(session, message);
 
-    this.options.sessionStore.save({
-      ...session,
-      messageCount: session.messageCount + 1,
-      lastActiveAt: this.clock()
-    });
+    try {
+      const response = await this.options.executor.execute(session, message);
+      this.persistSuccessfulExecution(session);
+      return response;
+    } catch (error) {
+      if (!this.shouldResetClaudeSession(session, error)) {
+        throw error;
+      }
 
-    return response;
+      const replacementSession: SessionProfile = {
+        ...session,
+        id: randomUUID(),
+        messageCount: 0,
+        lastActiveAt: this.clock()
+      };
+      const response = await this.options.executor.execute(replacementSession, message);
+
+      this.persistSuccessfulExecution(replacementSession);
+      return response;
+    }
   }
 
   private requireSession(sessionId: string): SessionProfile {
@@ -112,5 +124,22 @@ export class SessionOrchestrator {
       throw new Error(`Unknown session: ${sessionId}`);
     }
     return session;
+  }
+
+  private persistSuccessfulExecution(session: SessionProfile): void {
+    this.options.sessionStore.save({
+      ...session,
+      messageCount: session.messageCount + 1,
+      lastActiveAt: this.clock()
+    });
+  }
+
+  private shouldResetClaudeSession(session: SessionProfile, error: unknown): boolean {
+    if (session.messageCount === 0 || !(error instanceof Error)) {
+      return false;
+    }
+
+    const message = error.message.toLowerCase();
+    return message.includes('unexpected token') && message.includes('not valid json');
   }
 }

@@ -8,6 +8,9 @@ interface GatewayOptions {
   adapters: ChannelAdapter[];
   commandHandler: CommandHandler;
   orchestrator: SessionOrchestrator;
+  controlStore?: {
+    findProjectionByThreadId: (channelType: string, threadId: string) => unknown;
+  };
   controlRouter?: {
     resolve: (input: ChannelControlInput) => unknown;
   };
@@ -67,11 +70,20 @@ export class AgentGateway {
   }
 
   private async handleMessageNow(adapter: ChannelAdapter, message: AgentMessage): Promise<void> {
-    this.options.logger.info('Message received', { channelId: message.channelId, content: message.content.substring(0, 100) });
+    if (this.options.controlStore?.findProjectionByThreadId(message.channelType, message.channelId)) {
+      await adapter.send(message.channelId, {
+        content:
+          'This thread is reserved for control updates. Reply to a control message instead of sending a new conversation message.',
+        replyTo: message.id
+      });
+      return;
+    }
+
+    this.options.logger.info({ channelId: message.channelId, content: message.content.substring(0, 100) }, 'Message received');
     const session = this.options.orchestrator.getOrCreateSession(message.channelId, message.channelType);
 
     if (message.content.startsWith('/')) {
-      this.options.logger.info('Executing command', { channelId: message.channelId, content: message.content });
+      this.options.logger.info({ channelId: message.channelId, content: message.content }, 'Executing command');
       const context: CommandContext = {
         session,
         message,
@@ -82,7 +94,7 @@ export class AgentGateway {
       return;
     }
 
-    this.options.logger.info('Sending message to Claude', { channelId: message.channelId, sessionId: session.id });
+    this.options.logger.info({ channelId: message.channelId, sessionId: session.id }, 'Sending message to Claude');
     const stopTyping = await this.startTyping(adapter, message.channelId);
 
     try {
@@ -97,7 +109,7 @@ export class AgentGateway {
     try {
       await this.handleMessage(adapter, message);
     } catch (error) {
-      this.options.logger.error('Message handling failed', this.serializeError(message.channelId, error));
+      this.options.logger.error(this.serializeError(message.channelId, error), 'Message handling failed');
 
       try {
         await adapter.send(message.channelId, {
@@ -105,7 +117,7 @@ export class AgentGateway {
           replyTo: message.id
         });
       } catch (sendError) {
-        this.options.logger.error('Failed to send error message', this.serializeError(message.channelId, sendError));
+        this.options.logger.error(this.serializeError(message.channelId, sendError), 'Failed to send error message');
       }
     }
   }
@@ -119,7 +131,7 @@ export class AgentGateway {
 
     const timer = setInterval(() => {
       void adapter.typing?.(channelId).catch((error) => {
-        this.options.logger.error('Typing indicator failed', this.serializeError(channelId, error));
+        this.options.logger.error(this.serializeError(channelId, error), 'Typing indicator failed');
       });
     }, AgentGateway.TYPING_INTERVAL_MS);
 

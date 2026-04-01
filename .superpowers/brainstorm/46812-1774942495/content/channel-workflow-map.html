@@ -1,0 +1,137 @@
+<style>
+  .hero {
+    display: grid;
+    gap: 18px;
+  }
+  .pipeline {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 18px;
+    margin-top: 12px;
+  }
+  .lane {
+    border: 1px solid rgba(255,255,255,0.12);
+    border-radius: 16px;
+    padding: 16px;
+    background: linear-gradient(180deg, rgba(255,255,255,0.04), rgba(255,255,255,0.02));
+  }
+  .lane h3 {
+    margin-bottom: 6px;
+  }
+  .role {
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    text-transform: uppercase;
+    opacity: 0.72;
+    margin-bottom: 12px;
+  }
+  .bubble {
+    border-radius: 12px;
+    padding: 12px;
+    margin-top: 10px;
+    background: rgba(255,255,255,0.05);
+    border: 1px solid rgba(255,255,255,0.08);
+  }
+  .signal {
+    margin-top: 12px;
+    padding: 10px 12px;
+    border-radius: 999px;
+    background: rgba(80, 200, 120, 0.12);
+    border: 1px solid rgba(80, 200, 120, 0.24);
+    font-size: 14px;
+  }
+  .arrow-row {
+    display: grid;
+    grid-template-columns: repeat(2, 1fr);
+    gap: 18px;
+    margin: 6px 0;
+  }
+  .arrow {
+    text-align: center;
+    padding: 8px 10px;
+    border-radius: 999px;
+    background: rgba(255,255,255,0.06);
+    border: 1px dashed rgba(255,255,255,0.16);
+    font-size: 13px;
+  }
+  .focus {
+    display: grid;
+    grid-template-columns: 1.4fr 1fr;
+    gap: 16px;
+    margin-top: 12px;
+  }
+  .note {
+    border-left: 3px solid rgba(255,255,255,0.22);
+    padding-left: 12px;
+    opacity: 0.9;
+  }
+  .option strong {
+    display: block;
+    margin-bottom: 6px;
+  }
+  @media (max-width: 900px) {
+    .pipeline, .arrow-row, .focus {
+      grid-template-columns: 1fr;
+    }
+  }
+</style>
+
+<h2>频道即阶段，Reaction 只是流转信号</h2>
+<p class="subtitle">这是我根据你刚才的描述整理出的工作流心智模型，重点是“频道隔离上下文，审批信号驱动跨频道继续执行”。</p>
+
+<div class="hero">
+  <div class="pipeline">
+    <div class="lane">
+      <div class="role">Stage 1</div>
+      <h3>项目经理频道</h3>
+      <div class="bubble">你在这里提需求、澄清目标、补充约束。</div>
+      <div class="bubble">该频道保留完整需求讨论上下文。</div>
+      <div class="signal">Agent 到达关键节点后发出“待审批”信号</div>
+    </div>
+    <div class="lane">
+      <div class="role">Stage 2</div>
+      <h3>架构师频道</h3>
+      <div class="bubble">收到上游放行后，进入实现方案拆解与落地设计。</div>
+      <div class="bubble">只保留架构阶段需要的上下文，不混入需求细节对话。</div>
+    </div>
+    <div class="lane">
+      <div class="role">Stage 3</div>
+      <h3>测试频道</h3>
+      <div class="bubble">进入验证、回归、风险确认和交付检查。</div>
+      <div class="bubble">该频道只聚焦测试与验收，不背负前面两个阶段的全部历史。</div>
+    </div>
+  </div>
+
+  <div class="arrow-row">
+    <div class="arrow">reaction / 审批动作触发: 项目经理频道 → 架构师频道</div>
+    <div class="arrow">reaction / 审批动作触发: 架构师频道 → 测试频道</div>
+  </div>
+
+  <div class="focus">
+    <div class="mockup">
+      <div class="mockup-header">你想要解决的核心问题</div>
+      <div class="mockup-body">
+        <div class="note">不是让 Discord 变成聊天更方便，而是让 Discord 成为一个多阶段、多 session 并行的工作流控制终端。</div>
+        <div class="note">每个频道像一个 SubAgent / 角色容器，拥有独立上下文和职责边界。</div>
+        <div class="note">Reaction 不承担完整表达，只承担“推进、拒绝、转向、挂起”等工作流控制信号。</div>
+      </div>
+    </div>
+
+    <div class="options">
+      <div class="option" data-choice="understood" onclick="toggleSelect(this)">
+        <div class="letter">A</div>
+        <div class="content">
+          <strong>这个模型基本正确</strong>
+          <p>可以继续细化“一个阶段结束后，系统究竟往下游传什么”。</p>
+        </div>
+      </div>
+      <div class="option" data-choice="adjust" onclick="toggleSelect(this)">
+        <div class="letter">B</div>
+        <div class="content">
+          <strong>方向对，但还需要修正</strong>
+          <p>比如阶段边界、reaction 含义，或频道与 session 的关系还没完全说准。</p>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>

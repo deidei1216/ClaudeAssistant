@@ -5,7 +5,13 @@ import { AgentMessage, SessionProfile } from '../../src/core/types';
 describe('ClaudeCodeWorker', () => {
   it('maps a session into the correct claude CLI invocation', async () => {
     const runner = vi.fn().mockResolvedValue({
-      stdout: 'done',
+      stdout: JSON.stringify({
+        type: 'result',
+        subtype: 'success',
+        is_error: false,
+        result: 'done',
+        session_id: '9e0ef8e2-f9d7-4fb9-a261-4d35bc8b23eb'
+      }),
       stderr: '',
       exitCode: 0
     });
@@ -38,9 +44,11 @@ describe('ClaudeCodeWorker', () => {
     const response = await worker.execute(session, message);
 
     expect(runner).toHaveBeenCalledWith(
-      'claude',
+        'claude',
       [
         '--print',
+        '--output-format',
+        'json',
         '--resume',
         '9e0ef8e2-f9d7-4fb9-a261-4d35bc8b23eb',
         '--model',
@@ -65,7 +73,13 @@ describe('ClaudeCodeWorker', () => {
 
   it('works with minimal session config (no optional fields)', async () => {
     const runner = vi.fn().mockResolvedValue({
-      stdout: 'response',
+      stdout: JSON.stringify({
+        type: 'result',
+        subtype: 'success',
+        is_error: false,
+        result: 'response',
+        session_id: 'minimal-session-id'
+      }),
       stderr: '',
       exitCode: 0
     });
@@ -94,9 +108,11 @@ describe('ClaudeCodeWorker', () => {
     const response = await worker.execute(session, message);
 
     expect(runner).toHaveBeenCalledWith(
-      'claude',
+        'claude',
       [
         '--print',
+        '--output-format',
+        'json',
         '--session-id',
         'minimal-session-id',
         '--model',
@@ -109,6 +125,134 @@ describe('ClaudeCodeWorker', () => {
     );
     expect(response.content).toBe('response');
     expect(response.replyTo).toBe('msg-2');
+  });
+
+  it('parses structured Claude JSON output and returns the result field', async () => {
+    const runner = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        type: 'result',
+        subtype: 'success',
+        is_error: false,
+        result: 'structured response',
+        session_id: 'test-session'
+      }),
+      stderr: '',
+      exitCode: 0
+    });
+    const worker = new ClaudeCodeWorker(runner);
+    const session: SessionProfile = {
+      id: 'test-session',
+      channelId: 'channel-json',
+      channelType: 'discord',
+      model: 'sonnet',
+      workingDirectory: '/tmp',
+      permissionMode: 'auto',
+      createdAt: new Date(),
+      lastActiveAt: new Date(),
+      status: 'active',
+      messageCount: 0
+    };
+    const message: AgentMessage = {
+      id: 'msg-json',
+      channelId: 'channel-json',
+      channelType: 'discord',
+      userId: 'user-json',
+      content: 'hello',
+      timestamp: new Date()
+    };
+
+    const response = await worker.execute(session, message);
+
+    expect(response.content).toBe('structured response');
+  });
+
+  it('throws a helpful error when Claude returns invalid JSON output', async () => {
+    const runner = vi.fn().mockResolvedValue({
+      stdout: '\u0001Bud1 not json',
+      stderr: '',
+      exitCode: 0
+    });
+    const worker = new ClaudeCodeWorker(runner);
+    const session: SessionProfile = {
+      id: 'test-session',
+      channelId: 'channel-bad-json',
+      channelType: 'discord',
+      model: 'sonnet',
+      workingDirectory: '/tmp',
+      permissionMode: 'auto',
+      createdAt: new Date(),
+      lastActiveAt: new Date(),
+      status: 'active',
+      messageCount: 0
+    };
+    const message: AgentMessage = {
+      id: 'msg-bad-json',
+      channelId: 'channel-bad-json',
+      channelType: 'discord',
+      userId: 'user-bad-json',
+      content: 'hello',
+      timestamp: new Date()
+    };
+
+    await expect(worker.execute(session, message)).rejects.toThrow('Claude returned invalid JSON output');
+  });
+
+  it('retries with resume when a new session id already exists in Claude', async () => {
+    const runner = vi
+      .fn()
+      .mockResolvedValueOnce({
+        stdout: '',
+        stderr: 'Error: Session ID reused-session is already in use.\n',
+        exitCode: 1
+      })
+      .mockResolvedValueOnce({
+        stdout: JSON.stringify({
+          type: 'result',
+          subtype: 'success',
+          is_error: false,
+          result: 'recovered via resume',
+          session_id: 'reused-session'
+        }),
+        stderr: '',
+        exitCode: 0
+      });
+    const worker = new ClaudeCodeWorker(runner);
+    const session: SessionProfile = {
+      id: 'reused-session',
+      channelId: 'channel-resume-fallback',
+      channelType: 'discord',
+      model: 'sonnet',
+      workingDirectory: '/tmp',
+      permissionMode: 'auto',
+      createdAt: new Date(),
+      lastActiveAt: new Date(),
+      status: 'active',
+      messageCount: 0
+    };
+    const message: AgentMessage = {
+      id: 'msg-resume-fallback',
+      channelId: 'channel-resume-fallback',
+      channelType: 'discord',
+      userId: 'user-resume-fallback',
+      content: 'hello',
+      timestamp: new Date()
+    };
+
+    const response = await worker.execute(session, message);
+
+    expect(response.content).toBe('recovered via resume');
+    expect(runner).toHaveBeenNthCalledWith(
+      1,
+      'claude',
+      ['--print', '--output-format', 'json', '--session-id', 'reused-session', '--model', 'sonnet', '--permission-mode', 'auto', 'hello'],
+      { cwd: '/tmp' }
+    );
+    expect(runner).toHaveBeenNthCalledWith(
+      2,
+      'claude',
+      ['--print', '--output-format', 'json', '--resume', 'reused-session', '--model', 'sonnet', '--permission-mode', 'auto', 'hello'],
+      { cwd: '/tmp' }
+    );
   });
 
   it('throws error when claude CLI fails with stderr', async () => {

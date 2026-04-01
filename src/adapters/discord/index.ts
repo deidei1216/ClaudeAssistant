@@ -23,7 +23,12 @@ export class DiscordAdapter implements ChannelAdapter {
   constructor(
     private readonly client = new Client({
       intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
-    })
+    }),
+    private readonly logger: {
+      info?: (message: string, data?: unknown) => void;
+      warn?: (message: string, data?: unknown) => void;
+      error?: (message: string, data?: unknown) => void;
+    } = {}
   ) {}
 
   async initialize(config: DiscordAdapterConfig): Promise<void> {
@@ -35,6 +40,13 @@ export class DiscordAdapter implements ChannelAdapter {
       }
 
       if (message.reference?.messageId && this.controlCallback) {
+        this.log('info', 'Discord reply received for control processing', {
+          channelId: message.channelId,
+          threadId: message.channel?.isThread?.() ? message.channelId : undefined,
+          replyToMessageId: message.reference.messageId,
+          authorId: message.author.id,
+          content: message.content
+        });
         this.controlCallback(
           fromDiscordReply({
             id: message.id,
@@ -79,6 +91,13 @@ export class DiscordAdapter implements ChannelAdapter {
       });
 
       if (input) {
+        this.log('info', 'Discord reaction received for control processing', {
+          channelId: reaction.message.channelId,
+          threadId: reaction.message.channel.isThread?.() ? reaction.message.channelId : undefined,
+          messageId: reaction.message.id,
+          userId: user.id,
+          emoji: reaction.emoji.name
+        });
         this.controlCallback(input);
       }
     });
@@ -155,5 +174,10 @@ export class DiscordAdapter implements ChannelAdapter {
     if ('sendTyping' in channel && typeof channel.sendTyping === 'function') {
       await channel.sendTyping();
     }
+  }
+
+  private log(level: 'info' | 'warn' | 'error', message: string, data: Record<string, unknown>): void {
+    const method = this.logger[level];
+    method?.call(this.logger, data, message);
   }
 }

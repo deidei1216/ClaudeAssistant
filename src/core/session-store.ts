@@ -48,12 +48,18 @@ export class SessionStore {
     try {
       return readdirSync(this.baseDir)
         .flatMap((channelType) => {
+          if (channelType.startsWith('.')) {
+            return [];
+          }
+
           const dir = join(this.baseDir, channelType);
           if (!statSync(dir).isDirectory()) {
             return [];
           }
 
-          return readdirSync(dir).map((file) => deserialize(readFileSync(join(dir, file), 'utf8')));
+          return readdirSync(dir)
+            .filter((file) => file.endsWith('.json'))
+            .map((file) => deserialize(readFileSync(join(dir, file), 'utf8')));
         })
         .sort((left, right) => right.lastActiveAt.getTime() - left.lastActiveAt.getTime());
     } catch (error) {

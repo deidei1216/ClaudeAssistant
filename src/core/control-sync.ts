@@ -14,6 +14,7 @@ interface ControlSyncOptions {
 
 export class ControlSync {
   private timer?: ReturnType<typeof setInterval>;
+  private inFlight?: Promise<void>;
 
   constructor(private readonly options: ControlSyncOptions) {}
 
@@ -29,6 +30,19 @@ export class ControlSync {
   }
 
   async syncOnce(): Promise<void> {
+    if (this.inFlight) {
+      return this.inFlight;
+    }
+
+    this.inFlight = this.runSyncOnce();
+    try {
+      await this.inFlight;
+    } finally {
+      this.inFlight = undefined;
+    }
+  }
+
+  private async runSyncOnce(): Promise<void> {
     for (const adapter of this.options.adapters) {
       if (!adapter.upsertControlMessage) {
         continue;

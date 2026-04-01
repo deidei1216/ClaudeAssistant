@@ -74,6 +74,17 @@ export class ControlStore {
     );
   }
 
+  findPendingRequestByThreadId(channelType: string, threadId: string): ControlRequest | null {
+    const matches = this.listRequests().filter(
+      (request) =>
+        request.status === 'pending' &&
+        request.sourceMessage?.channelType === channelType &&
+        request.sourceMessage?.threadId === threadId
+    );
+
+    return matches.length === 1 ? matches[0] : null;
+  }
+
   saveSignal(signal: ControlSignal): void {
     this.write('signals', signal.id, serializeDateRecord(signal));
   }
@@ -98,6 +109,12 @@ export class ControlStore {
     return this.read('projections', `${channelType}-${runId}`, deserializeProjection);
   }
 
+  findProjectionByThreadId(channelType: string, threadId: string): ChannelProjection | null {
+    return this.list('projections', deserializeProjection).find(
+      (projection) => projection.channelType === channelType && projection.threadId === threadId
+    ) ?? null;
+  }
+
   private write(group: string, id: string, content: string): void {
     const dir = join(this.baseDir, group);
     mkdirSync(dir, { recursive: true });
@@ -107,18 +124,26 @@ export class ControlStore {
   private read<T>(group: string, id: string, deserialize: (raw: string) => T): T | null {
     try {
       return deserialize(readFileSync(join(this.baseDir, group, `${id}.json`), 'utf8'));
-    } catch {
-      return null;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return null;
+      }
+      throw error;
     }
   }
 
   private list<T>(group: string, deserialize: (raw: string) => T): T[] {
     try {
-      return readdirSync(join(this.baseDir, group)).map((file) =>
+      return readdirSync(join(this.baseDir, group))
+        .filter((file) => file.endsWith('.json'))
+        .map((file) =>
         deserialize(readFileSync(join(this.baseDir, group, file), 'utf8'))
-      );
-    } catch {
-      return [];
+        );
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === 'ENOENT') {
+        return [];
+      }
+      throw error;
     }
   }
 }
