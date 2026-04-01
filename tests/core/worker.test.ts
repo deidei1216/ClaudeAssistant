@@ -1,8 +1,22 @@
-import { describe, expect, it, vi } from 'vitest';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { ClaudeCodeWorker } from '../../src/core/worker';
 import { AgentMessage, SessionProfile } from '../../src/core/types';
 
 describe('ClaudeCodeWorker', () => {
+  const tempDirectories: string[] = [];
+
+  afterEach(() => {
+    while (tempDirectories.length > 0) {
+      const directory = tempDirectories.pop();
+      if (directory) {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    }
+  });
+
   it('maps a session into the correct claude CLI invocation', async () => {
     const runner = vi.fn().mockResolvedValue({
       stdout: JSON.stringify({
@@ -127,6 +141,118 @@ describe('ClaudeCodeWorker', () => {
     expect(response.replyTo).toBe('msg-2');
   });
 
+  it('adds an attachment manifest to the prompt when attachments are present', async () => {
+    const runner = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        type: 'result',
+        subtype: 'success',
+        is_error: false,
+        result: 'attachment-aware response',
+        session_id: 'attachment-session'
+      }),
+      stderr: '',
+      exitCode: 0
+    });
+    const worker = new ClaudeCodeWorker(runner);
+    const session: SessionProfile = {
+      id: 'attachment-session',
+      channelId: 'channel-attachments',
+      channelType: 'discord',
+      model: 'sonnet',
+      workingDirectory: '/home/user/project',
+      permissionMode: 'auto',
+      createdAt: new Date(),
+      lastActiveAt: new Date(),
+      status: 'active',
+      messageCount: 0
+    };
+    const message: AgentMessage = {
+      id: 'msg-attachments',
+      channelId: 'channel-attachments',
+      channelType: 'discord',
+      userId: 'user-attachments',
+      content: 'Review the attached mockup.',
+      attachments: [
+        {
+          id: 'att-1',
+          name: 'mockup.png',
+          type: 'image/png',
+          size: 1234,
+          url: 'https://cdn.discordapp.com/attachments/att-1',
+          localPath: '/home/user/project/assets/mockup.png'
+        }
+      ],
+      timestamp: new Date()
+    };
+
+    await worker.execute(session, message);
+
+    const prompt = runner.mock.calls[0]?.[1]?.at(-1);
+
+    expect(prompt).toContain('Review the attached mockup.');
+    expect(prompt).toContain('Attached files:');
+    expect(prompt).toContain('mockup.png');
+    expect(prompt).toContain('image/png');
+    expect(prompt).toContain('1234 bytes');
+    expect(prompt).toContain('assets/mockup.png');
+    expect(prompt).toContain(
+      'If you want Discord to receive a local file, include [[file:relative/path/from-working-directory]] on its own line in your final answer.'
+    );
+  });
+
+  it('falls back to a safe attachment location when localPath escapes the working directory', async () => {
+    const runner = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        type: 'result',
+        subtype: 'success',
+        is_error: false,
+        result: 'attachment-aware response',
+        session_id: 'attachment-session'
+      }),
+      stderr: '',
+      exitCode: 0
+    });
+    const worker = new ClaudeCodeWorker(runner);
+    const session: SessionProfile = {
+      id: 'attachment-session',
+      channelId: 'channel-attachments',
+      channelType: 'discord',
+      model: 'sonnet',
+      workingDirectory: '/home/user/project',
+      permissionMode: 'auto',
+      createdAt: new Date(),
+      lastActiveAt: new Date(),
+      status: 'active',
+      messageCount: 0
+    };
+    const message: AgentMessage = {
+      id: 'msg-attachments-outside',
+      channelId: 'channel-attachments',
+      channelType: 'discord',
+      userId: 'user-attachments',
+      content: 'Review the attached mockup.',
+      attachments: [
+        {
+          id: 'att-2',
+          name: 'mockup.png',
+          type: 'image/png',
+          size: 1234,
+          url: 'https://cdn.discordapp.com/attachments/att-2',
+          localPath: '/home/user/other-project/assets/mockup.png'
+        }
+      ],
+      timestamp: new Date()
+    };
+
+    await worker.execute(session, message);
+
+    const prompt = runner.mock.calls[0]?.[1]?.at(-1);
+
+    expect(prompt).toContain('Attached files:');
+    expect(prompt).toContain('https://cdn.discordapp.com/attachments/att-2');
+    expect(prompt).not.toContain('../');
+  });
+
   it('parses structured Claude JSON output and returns the result field', async () => {
     const runner = vi.fn().mockResolvedValue({
       stdout: JSON.stringify({
@@ -166,6 +292,195 @@ describe('ClaudeCodeWorker', () => {
     expect(response.content).toBe('structured response');
   });
 
+  it('creates outbound attachments from valid file markers and strips them from the response', async () => {
+    const workingDirectory = mkdtempSync(join(tmpdir(), 'claude-worker-'));
+    tempDirectories.push(workingDirectory);
+    const artifactPath = join(workingDirectory, 'artifacts', 'report.txt');
+    mkdirSync(join(workingDirectory, 'artifacts'), { recursive: true });
+    writeFileSync(artifactPath, 'report contents');
+
+    const runner = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        type: 'result',
+        subtype: 'success',
+        is_error: false,
+        result: 'Here is the report.\n[[file:artifacts/report.txt]]\nThanks!',
+        session_id: 'attachment-session'
+      }),
+      stderr: '',
+      exitCode: 0
+    });
+    const worker = new ClaudeCodeWorker(runner);
+    const session: SessionProfile = {
+      id: 'attachment-session',
+      channelId: 'channel-outbound',
+      channelType: 'discord',
+      model: 'sonnet',
+      workingDirectory,
+      permissionMode: 'auto',
+      createdAt: new Date(),
+      lastActiveAt: new Date(),
+      status: 'active',
+      messageCount: 0
+    };
+    const message: AgentMessage = {
+      id: 'msg-outbound',
+      channelId: 'channel-outbound',
+      channelType: 'discord',
+      userId: 'user-outbound',
+      content: 'Send me the generated report.',
+      timestamp: new Date()
+    };
+
+    const response = await worker.execute(session, message);
+
+    expect(response.content).toBe('Here is the report.\n\nThanks!');
+    expect(response.replyTo).toBe('msg-outbound');
+    expect(response.attachments).toEqual([
+      expect.objectContaining({
+        name: 'report.txt',
+        localPath: artifactPath
+      })
+    ]);
+  });
+
+  it('does not treat inline file markers in prose as outbound attachments', async () => {
+    const workingDirectory = mkdtempSync(join(tmpdir(), 'claude-worker-'));
+    tempDirectories.push(workingDirectory);
+    const artifactPath = join(workingDirectory, 'artifacts', 'report.txt');
+    mkdirSync(join(workingDirectory, 'artifacts'), { recursive: true });
+    writeFileSync(artifactPath, 'report contents');
+
+    const runner = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        type: 'result',
+        subtype: 'success',
+        is_error: false,
+        result: 'Mention [[file:artifacts/report.txt]] inline, but do not attach it.',
+        session_id: 'attachment-session'
+      }),
+      stderr: '',
+      exitCode: 0
+    });
+    const worker = new ClaudeCodeWorker(runner);
+    const session: SessionProfile = {
+      id: 'attachment-session',
+      channelId: 'channel-outbound',
+      channelType: 'discord',
+      model: 'sonnet',
+      workingDirectory,
+      permissionMode: 'auto',
+      createdAt: new Date(),
+      lastActiveAt: new Date(),
+      status: 'active',
+      messageCount: 0
+    };
+    const message: AgentMessage = {
+      id: 'msg-inline-marker',
+      channelId: 'channel-outbound',
+      channelType: 'discord',
+      userId: 'user-outbound',
+      content: 'Explain how outbound files work.',
+      timestamp: new Date()
+    };
+
+    const response = await worker.execute(session, message);
+
+    expect(response.attachments).toBeUndefined();
+    expect(response.content).toBe('Mention [[file:artifacts/report.txt]] inline, but do not attach it.');
+  });
+
+  it('does not treat standalone file markers inside fenced code blocks as outbound attachments', async () => {
+    const workingDirectory = mkdtempSync(join(tmpdir(), 'claude-worker-'));
+    tempDirectories.push(workingDirectory);
+    const artifactPath = join(workingDirectory, 'artifacts', 'report.txt');
+    mkdirSync(join(workingDirectory, 'artifacts'), { recursive: true });
+    writeFileSync(artifactPath, 'report contents');
+
+    const runner = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        type: 'result',
+        subtype: 'success',
+        is_error: false,
+        result: 'Use this example:\n```txt\n[[file:artifacts/report.txt]]\n```\nOutside the example.',
+        session_id: 'attachment-session'
+      }),
+      stderr: '',
+      exitCode: 0
+    });
+    const worker = new ClaudeCodeWorker(runner);
+    const session: SessionProfile = {
+      id: 'attachment-session',
+      channelId: 'channel-outbound',
+      channelType: 'discord',
+      model: 'sonnet',
+      workingDirectory,
+      permissionMode: 'auto',
+      createdAt: new Date(),
+      lastActiveAt: new Date(),
+      status: 'active',
+      messageCount: 0
+    };
+    const message: AgentMessage = {
+      id: 'msg-fenced-marker',
+      channelId: 'channel-outbound',
+      channelType: 'discord',
+      userId: 'user-outbound',
+      content: 'Explain how outbound files work.',
+      timestamp: new Date()
+    };
+
+    const response = await worker.execute(session, message);
+
+    expect(response.attachments).toBeUndefined();
+    expect(response.content).toBe('Use this example:\n```txt\n[[file:artifacts/report.txt]]\n```\nOutside the example.');
+  });
+
+  it('keeps unsafe outbound file markers out of attachments and adds a visible error note', async () => {
+    const workingDirectory = mkdtempSync(join(tmpdir(), 'claude-worker-'));
+    tempDirectories.push(workingDirectory);
+
+    const runner = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        type: 'result',
+        subtype: 'success',
+        is_error: false,
+        result: 'I could not attach that file.\n[[file:../../secret.txt]]',
+        session_id: 'attachment-session'
+      }),
+      stderr: '',
+      exitCode: 0
+    });
+    const worker = new ClaudeCodeWorker(runner);
+    const session: SessionProfile = {
+      id: 'attachment-session',
+      channelId: 'channel-outbound',
+      channelType: 'discord',
+      model: 'sonnet',
+      workingDirectory,
+      permissionMode: 'auto',
+      createdAt: new Date(),
+      lastActiveAt: new Date(),
+      status: 'active',
+      messageCount: 0
+    };
+    const message: AgentMessage = {
+      id: 'msg-outbound-error',
+      channelId: 'channel-outbound',
+      channelType: 'discord',
+      userId: 'user-outbound',
+      content: 'Send me the generated report.',
+      timestamp: new Date()
+    };
+
+    const response = await worker.execute(session, message);
+
+    expect(response.attachments).toBeUndefined();
+    expect(response.replyTo).toBe('msg-outbound-error');
+    expect(response.content).toContain('I could not attach that file.');
+    expect(response.content).toContain('Could not attach ../../secret.txt');
+  });
+
   it('throws a helpful error when Claude returns invalid JSON output', async () => {
     const runner = vi.fn().mockResolvedValue({
       stdout: '\u0001Bud1 not json',
@@ -195,6 +510,79 @@ describe('ClaudeCodeWorker', () => {
     };
 
     await expect(worker.execute(session, message)).rejects.toThrow('Claude returned invalid JSON output');
+  });
+
+  it('throws a helpful error when Claude returns JSON with a non-string result', async () => {
+    const runner = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        type: 'result',
+        subtype: 'success',
+        is_error: false,
+        result: { text: 'not a string' },
+        session_id: 'test-session'
+      }),
+      stderr: '',
+      exitCode: 0
+    });
+    const worker = new ClaudeCodeWorker(runner);
+    const session: SessionProfile = {
+      id: 'test-session',
+      channelId: 'channel-bad-result',
+      channelType: 'discord',
+      model: 'sonnet',
+      workingDirectory: '/tmp',
+      permissionMode: 'auto',
+      createdAt: new Date(),
+      lastActiveAt: new Date(),
+      status: 'active',
+      messageCount: 0
+    };
+    const message: AgentMessage = {
+      id: 'msg-bad-result',
+      channelId: 'channel-bad-result',
+      channelType: 'discord',
+      userId: 'user-bad-result',
+      content: 'hello',
+      timestamp: new Date()
+    };
+
+    await expect(worker.execute(session, message)).rejects.toThrow('Claude returned an invalid result payload');
+  });
+
+  it('throws a helpful error when Claude returns JSON without a result field', async () => {
+    const runner = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        type: 'result',
+        subtype: 'success',
+        is_error: false,
+        session_id: 'test-session'
+      }),
+      stderr: '',
+      exitCode: 0
+    });
+    const worker = new ClaudeCodeWorker(runner);
+    const session: SessionProfile = {
+      id: 'test-session',
+      channelId: 'channel-missing-result',
+      channelType: 'discord',
+      model: 'sonnet',
+      workingDirectory: '/tmp',
+      permissionMode: 'auto',
+      createdAt: new Date(),
+      lastActiveAt: new Date(),
+      status: 'active',
+      messageCount: 0
+    };
+    const message: AgentMessage = {
+      id: 'msg-missing-result',
+      channelId: 'channel-missing-result',
+      channelType: 'discord',
+      userId: 'user-missing-result',
+      content: 'hello',
+      timestamp: new Date()
+    };
+
+    await expect(worker.execute(session, message)).rejects.toThrow('Claude returned an invalid result payload');
   });
 
   it('retries with resume when a new session id already exists in Claude', async () => {

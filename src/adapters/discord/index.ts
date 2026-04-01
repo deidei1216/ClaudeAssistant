@@ -1,6 +1,7 @@
 import { Client, Events, GatewayIntentBits, type TextChannel, type NewsChannel, type DMChannel, type ThreadChannel, type VoiceChannel } from 'discord.js';
 import type { AdapterConfig, ChannelAdapter, MessageResult } from '../../core/adapter';
 import type { AgentMessage, AgentResponse, ChannelControlInput } from '../../core/types';
+import { downloadInboundAttachment } from '../../core/attachments';
 import { fromDiscordMessage, toDiscordChunks } from './message-formatter';
 import { fromDiscordReaction, fromDiscordReply } from './control-input-mapper';
 
@@ -25,16 +26,16 @@ export class DiscordAdapter implements ChannelAdapter {
       intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent]
     }),
     private readonly logger: {
-      info?: (message: string, data?: unknown) => void;
-      warn?: (message: string, data?: unknown) => void;
-      error?: (message: string, data?: unknown) => void;
+      info?: (data: unknown, message: string) => void;
+      warn?: (data: unknown, message: string) => void;
+      error?: (data: unknown, message: string) => void;
     } = {}
   ) {}
 
   async initialize(config: DiscordAdapterConfig): Promise<void> {
     this.config = config;
 
-    this.client.on(Events.MessageCreate, (message) => {
+    this.client.on(Events.MessageCreate, async (message) => {
       if (message.author.bot) {
         return;
       }
@@ -63,15 +64,44 @@ export class DiscordAdapter implements ChannelAdapter {
       }
 
       if (this.callback) {
-        this.callback(
-          fromDiscordMessage({
-            id: message.id,
-            channelId: message.channelId,
-            author: { id: message.author.id, bot: message.author.bot },
-            content: message.content,
-            createdAt: message.createdAt
-          })
-        );
+        const agentMessage = fromDiscordMessage({
+          id: message.id,
+          channelId: message.channelId,
+          author: { id: message.author.id, bot: message.author.bot },
+          content: message.content,
+          createdAt: message.createdAt,
+          attachments: [...message.attachments.values()].map((attachment) => ({
+            id: attachment.id,
+            name: attachment.name,
+            contentType: attachment.contentType,
+            size: attachment.size,
+            url: attachment.url
+          }))
+        });
+
+        if (agentMessage.attachments?.length) {
+          agentMessage.attachments = await Promise.all(
+            agentMessage.attachments.map(async (attachment) => {
+              try {
+                return {
+                  ...attachment,
+                  localPath: await downloadInboundAttachment(process.cwd(), message.channelId, attachment)
+                };
+              } catch (error) {
+                this.log('error', 'Discord attachment download failed', {
+                  channelId: message.channelId,
+                  messageId: message.id,
+                  attachmentId: attachment.id,
+                  attachmentUrl: attachment.url,
+                  error: error instanceof Error ? error.message : String(error)
+                });
+                return attachment;
+              }
+            })
+          );
+        }
+
+        this.callback(agentMessage);
       }
     });
 
@@ -155,10 +185,13 @@ export class DiscordAdapter implements ChannelAdapter {
     const sendableChannel = channel as SendableChannel;
     const maxLength = this.config?.messageLimits?.maxLength ?? 2000;
     const chunks = toDiscordChunks(response.content, maxLength);
+    const files = response.attachments?.flatMap((attachment) => (attachment.localPath ? [attachment.localPath] : [])) ?? [];
     let lastMessageId = '';
 
-    for (const chunk of chunks) {
-      const sent = await sendableChannel.send(chunk);
+    for (const [index, chunk] of chunks.entries()) {
+      const isFinalChunk = index === chunks.length - 1;
+      const payload = isFinalChunk && files.length > 0 ? { content: chunk, files } : chunk;
+      const sent = await sendableChannel.send(payload);
       lastMessageId = sent.id;
     }
 

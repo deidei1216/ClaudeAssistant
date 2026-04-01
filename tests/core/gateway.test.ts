@@ -1,4 +1,7 @@
-import { describe, expect, it, vi } from 'vitest';
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { afterEach, describe, expect, it, vi } from 'vitest';
 import { AgentGateway } from '../../src/core/gateway';
 import { ChannelAdapter } from '../../src/core/adapter';
 import { AgentMessage, SessionProfile } from '../../src/core/types';
@@ -6,6 +9,17 @@ import { CommandHandler } from '../../src/commands';
 import { ChannelControlInput } from '../../src/core/types';
 
 describe('AgentGateway', () => {
+  const tempDirectories: string[] = [];
+
+  afterEach(() => {
+    while (tempDirectories.length > 0) {
+      const directory = tempDirectories.pop();
+      if (directory) {
+        rmSync(directory, { recursive: true, force: true });
+      }
+    }
+  });
+
   // Helper to create a default session
   const createSession = (overrides?: Partial<SessionProfile>): SessionProfile => ({
     id: 'session-1',
@@ -139,6 +153,134 @@ describe('AgentGateway', () => {
       content: 'Claude response',
       replyTo: 'msg-1'
     });
+  });
+
+  it('copies inbound attachments into the session working directory before executing Claude', async () => {
+    const sourceRoot = mkdtempSync(join(tmpdir(), 'gateway-source-'));
+    const workingDirectory = mkdtempSync(join(tmpdir(), 'gateway-session-'));
+    tempDirectories.push(sourceRoot, workingDirectory);
+    mkdirSync(join(sourceRoot, '.claude-gateway', 'inbox', 'channel-1'), { recursive: true });
+    const sourcePath = join(sourceRoot, '.claude-gateway', 'inbox', 'channel-1', 'att-1-report.txt');
+    writeFileSync(sourcePath, 'attachment payload');
+
+    const adapter: ChannelAdapter = {
+      type: 'discord',
+      name: 'Discord',
+      onMessage: vi.fn(),
+      send: vi.fn().mockResolvedValue({ messageId: '1', success: true }),
+      initialize: vi.fn(),
+      connect: vi.fn(),
+      disconnect: vi.fn()
+    };
+    const commandHandler = {
+      executeFromMessage: vi.fn()
+    };
+    const session = createSession({ workingDirectory });
+    const orchestrator = {
+      getOrCreateSession: vi.fn().mockReturnValue(session),
+      execute: vi.fn().mockResolvedValue({ content: 'Claude response', replyTo: 'msg-1' })
+    };
+    const gateway = new AgentGateway({
+      adapters: [adapter],
+      commandHandler: commandHandler as unknown as CommandHandler,
+      orchestrator: orchestrator as unknown as {
+        getOrCreateSession: (channelId: string, channelType: string) => SessionProfile;
+        execute: (sessionId: string, message: AgentMessage) => Promise<{ content: string; replyTo?: string }>;
+      },
+      logger: { info: vi.fn(), error: vi.fn() }
+    });
+
+    await gateway.handleMessage(
+      adapter,
+      createMessage('review this file', {
+        attachments: [
+          {
+            id: 'att-1',
+            name: 'report.txt',
+            type: 'text/plain',
+            size: 18,
+            url: 'https://cdn.discordapp.com/attachments/att-1',
+            localPath: sourcePath
+          }
+        ]
+      })
+    );
+
+    const forwardedMessage = orchestrator.execute.mock.calls[0]?.[1] as AgentMessage | undefined;
+    const forwardedAttachment = forwardedMessage?.attachments?.[0];
+
+    expect(forwardedAttachment?.localPath).toEqual(
+      expect.stringContaining(`${workingDirectory}/.claude-gateway/inbox/channel-1/att-1-report.txt`)
+    );
+    expect(readFileSync(forwardedAttachment?.localPath ?? '', 'utf8')).toBe('attachment payload');
+    expect(adapter.send).toHaveBeenCalledWith('channel-1', {
+      content: 'Claude response',
+      replyTo: 'msg-1'
+    });
+  });
+
+  it('defensively copies symlinked attachment paths that escape the working directory', async () => {
+    const outsideRoot = mkdtempSync(join(tmpdir(), 'gateway-outside-'));
+    const workingDirectory = mkdtempSync(join(tmpdir(), 'gateway-session-'));
+    tempDirectories.push(outsideRoot, workingDirectory);
+    mkdirSync(join(outsideRoot, 'attachments'), { recursive: true });
+    mkdirSync(join(workingDirectory, 'linked'), { recursive: true });
+    const outsidePath = join(outsideRoot, 'attachments', 'att-2-report.txt');
+    const symlinkPath = join(workingDirectory, 'linked', 'att-2-report.txt');
+    writeFileSync(outsidePath, 'symlink attachment payload');
+    symlinkSync(outsidePath, symlinkPath);
+
+    const adapter: ChannelAdapter = {
+      type: 'discord',
+      name: 'Discord',
+      onMessage: vi.fn(),
+      send: vi.fn().mockResolvedValue({ messageId: '1', success: true }),
+      initialize: vi.fn(),
+      connect: vi.fn(),
+      disconnect: vi.fn()
+    };
+    const commandHandler = {
+      executeFromMessage: vi.fn()
+    };
+    const session = createSession({ workingDirectory });
+    const orchestrator = {
+      getOrCreateSession: vi.fn().mockReturnValue(session),
+      execute: vi.fn().mockResolvedValue({ content: 'Claude response', replyTo: 'msg-1' })
+    };
+    const gateway = new AgentGateway({
+      adapters: [adapter],
+      commandHandler: commandHandler as unknown as CommandHandler,
+      orchestrator: orchestrator as unknown as {
+        getOrCreateSession: (channelId: string, channelType: string) => SessionProfile;
+        execute: (sessionId: string, message: AgentMessage) => Promise<{ content: string; replyTo?: string }>;
+      },
+      logger: { info: vi.fn(), error: vi.fn() }
+    });
+
+    await gateway.handleMessage(
+      adapter,
+      createMessage('review the symlinked file', {
+        attachments: [
+          {
+            id: 'att-2',
+            name: 'report.txt',
+            type: 'text/plain',
+            size: 26,
+            url: 'https://cdn.discordapp.com/attachments/att-2',
+            localPath: symlinkPath
+          }
+        ]
+      })
+    );
+
+    const forwardedMessage = orchestrator.execute.mock.calls[0]?.[1] as AgentMessage | undefined;
+    const forwardedAttachment = forwardedMessage?.attachments?.[0];
+
+    expect(forwardedAttachment?.localPath).toEqual(
+      expect.stringContaining(`${workingDirectory}/.claude-gateway/inbox/channel-1/att-2-report.txt`)
+    );
+    expect(forwardedAttachment?.localPath).not.toBe(symlinkPath);
+    expect(readFileSync(forwardedAttachment?.localPath ?? '', 'utf8')).toBe('symlink attachment payload');
   });
 
   it('creates or retrieves session for each message', async () => {

@@ -1,8 +1,11 @@
+import { copyFileSync, existsSync, lstatSync, mkdirSync, realpathSync } from 'node:fs';
+import { join, resolve, sep } from 'node:path';
 import { ChannelAdapter } from './adapter';
 import { AgentMessage, ChannelControlInput } from './types';
 import { SessionOrchestrator } from './orchestrator';
 import { CommandHandler } from '../commands';
 import { CommandContext } from '../commands/types';
+import { sanitizeAttachmentName } from './attachments';
 
 interface GatewayOptions {
   adapters: ChannelAdapter[];
@@ -81,25 +84,26 @@ export class AgentGateway {
 
     this.options.logger.info({ channelId: message.channelId, content: message.content.substring(0, 100) }, 'Message received');
     const session = this.options.orchestrator.getOrCreateSession(message.channelId, message.channelType);
+    const normalizedMessage = this.normalizeMessageAttachments(message, session.workingDirectory);
 
-    if (message.content.startsWith('/')) {
-      this.options.logger.info({ channelId: message.channelId, content: message.content }, 'Executing command');
+    if (normalizedMessage.content.startsWith('/')) {
+      this.options.logger.info({ channelId: normalizedMessage.channelId, content: normalizedMessage.content }, 'Executing command');
       const context: CommandContext = {
         session,
-        message,
+        message: normalizedMessage,
         orchestrator: this.options.orchestrator
       };
-      const result = await this.options.commandHandler.executeFromMessage(message, context);
-      await adapter.send(message.channelId, { content: result.message ?? 'Done.', replyTo: message.id });
+      const result = await this.options.commandHandler.executeFromMessage(normalizedMessage, context);
+      await adapter.send(normalizedMessage.channelId, { content: result.message ?? 'Done.', replyTo: normalizedMessage.id });
       return;
     }
 
-    this.options.logger.info({ channelId: message.channelId, sessionId: session.id }, 'Sending message to Claude');
-    const stopTyping = await this.startTyping(adapter, message.channelId);
+    this.options.logger.info({ channelId: normalizedMessage.channelId, sessionId: session.id }, 'Sending message to Claude');
+    const stopTyping = await this.startTyping(adapter, normalizedMessage.channelId);
 
     try {
-      const response = await this.options.orchestrator.execute(session.id, message);
-      await adapter.send(message.channelId, response);
+      const response = await this.options.orchestrator.execute(session.id, normalizedMessage);
+      await adapter.send(normalizedMessage.channelId, response);
     } finally {
       stopTyping();
     }
@@ -166,5 +170,69 @@ export class AgentGateway {
       stderr: withDetails.stderr,
       exitCode: withDetails.exitCode
     };
+  }
+
+  private normalizeMessageAttachments(message: AgentMessage, workingDirectory: string): AgentMessage {
+    if (!message.attachments?.length) {
+      return message;
+    }
+
+    return {
+      ...message,
+      attachments: message.attachments.map((attachment) => {
+        if (!attachment.localPath || !existsSync(attachment.localPath) || this.isInsideDirectory(workingDirectory, attachment.localPath)) {
+          return attachment;
+        }
+
+        const targetPath = join(
+          workingDirectory,
+          '.claude-gateway',
+          'inbox',
+          sanitizeAttachmentName(message.channelId),
+          `${sanitizeAttachmentName(attachment.id)}-${sanitizeAttachmentName(attachment.name)}`
+        );
+
+        mkdirSync(join(workingDirectory, '.claude-gateway', 'inbox', sanitizeAttachmentName(message.channelId)), { recursive: true });
+        copyFileSync(attachment.localPath, targetPath);
+
+        return {
+          ...attachment,
+          localPath: targetPath
+        };
+      })
+    };
+  }
+
+  private isInsideDirectory(directory: string, candidatePath: string): boolean {
+    const absoluteDirectory = resolve(directory);
+    const resolvedDirectory = realpathSync(absoluteDirectory);
+    const absoluteCandidatePath = resolve(candidatePath);
+    const resolvedCandidatePath =
+      existsSync(absoluteCandidatePath) || this.pathHasSymlink(absoluteCandidatePath)
+        ? realpathSync(absoluteCandidatePath)
+        : absoluteCandidatePath;
+
+    return (
+      resolvedCandidatePath === resolvedDirectory ||
+      resolvedCandidatePath.startsWith(`${resolvedDirectory}${sep}`)
+    );
+  }
+
+  private pathHasSymlink(candidatePath: string): boolean {
+    let currentPath = resolve(candidatePath);
+
+    while (currentPath.length > 1 && currentPath !== '.') {
+      if (existsSync(currentPath) && lstatSync(currentPath).isSymbolicLink()) {
+        return true;
+      }
+
+      const parentPath = resolve(currentPath, '..');
+      if (parentPath === currentPath) {
+        break;
+      }
+      currentPath = parentPath;
+    }
+
+    return false;
   }
 }

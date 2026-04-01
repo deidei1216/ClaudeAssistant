@@ -1,0 +1,164 @@
+import { existsSync, mkdirSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { basename, isAbsolute, join, normalize, resolve, sep } from 'node:path';
+
+const INVALID_FILE_NAME_CHARS = /[<>:"/\\|?*\u0000-\u001f]/g;
+const MARKER_PATTERN = /^[\t ]*\[\[file:([^\]\r\n]+)\]\][\t ]*$/;
+const FENCE_PATTERN = /^[\t ]*(([`~])\2{2,})/;
+
+function isInsideWorkingDirectory(workingDirectory: string, candidatePath: string): boolean {
+  return candidatePath === workingDirectory || candidatePath.startsWith(`${workingDirectory}${sep}`);
+}
+
+export function sanitizeAttachmentName(name: string): string {
+  const fileName = basename(name)
+    .replace(INVALID_FILE_NAME_CHARS, '_')
+    .replace(/^[._]+/, '')
+    .trim();
+  return fileName.length > 0 ? fileName : 'attachment';
+}
+
+interface InboundAttachmentDownload {
+  id: string;
+  name: string;
+  url: string;
+}
+
+function resolveInboundInboxTarget(rootDirectory: string, sessionKey: string): string {
+  const inboxRoot = join(realpathSync(resolve(rootDirectory)), '.claude-gateway', 'inbox');
+  const targetDirectory = normalize(resolve(inboxRoot, sessionKey));
+
+  if (!isInsideWorkingDirectory(inboxRoot, targetDirectory)) {
+    throw new Error('Path escapes the inbox root');
+  }
+
+  let currentPath = inboxRoot;
+  const segments = normalize(sessionKey).split(sep).filter(Boolean);
+  for (const segment of segments) {
+    currentPath = resolve(currentPath, segment);
+
+    if (!existsSync(currentPath)) {
+      break;
+    }
+
+    const realCurrentPath = realpathSync(currentPath);
+    if (!isInsideWorkingDirectory(inboxRoot, realCurrentPath)) {
+      throw new Error('Path escapes the inbox root');
+    }
+
+    currentPath = realCurrentPath;
+  }
+
+  return targetDirectory;
+}
+
+export async function downloadInboundAttachment(
+  rootDirectory: string,
+  sessionKey: string,
+  attachment: InboundAttachmentDownload
+): Promise<string> {
+  const safeAttachmentId = sanitizeAttachmentName(attachment.id);
+  const safeFileName = sanitizeAttachmentName(attachment.name);
+  const targetDirectory = resolveInboundInboxTarget(rootDirectory, sessionKey);
+  const targetPath = join(targetDirectory, `${safeAttachmentId}-${safeFileName}`);
+
+  const response = await fetch(attachment.url);
+  if (!response.ok) {
+    throw new Error(`Failed to download inbound attachment ${attachment.id}: ${response.status}`);
+  }
+
+  mkdirSync(targetDirectory, { recursive: true });
+  writeFileSync(targetPath, Buffer.from(await response.arrayBuffer()));
+
+  return targetPath;
+}
+
+export function extractFileMarkers(content: string): { content: string; markers: string[] } {
+  const markers: string[] = [];
+  let activeFence: { char: '`' | '~'; length: number } | null = null;
+
+  const stripped = content
+    .split('\n')
+    .map((line) => {
+      const fenceMatch = line.match(FENCE_PATTERN);
+      if (fenceMatch) {
+        const fenceLength = fenceMatch[1].length;
+        const fenceChar = fenceMatch[2] as '`' | '~';
+        if (!activeFence) {
+          activeFence = { char: fenceChar, length: fenceLength };
+        } else if (activeFence.char === fenceChar && fenceLength >= activeFence.length) {
+          activeFence = null;
+        }
+        return line;
+      }
+
+      if (activeFence) {
+        return line;
+      }
+
+      const match = line.match(MARKER_PATTERN);
+      if (!match) {
+        return line;
+      }
+
+      markers.push(match[1].trim());
+      return '';
+    })
+    .join('\n');
+
+  return {
+    content: stripped,
+    markers
+  };
+}
+
+export function resolveOutboundAttachment(
+  workingDirectory: string,
+  relativePath: string
+):
+  | { ok: true; relativePath: string; absolutePath: string }
+  | { ok: false; reason: string } {
+  if (isAbsolute(relativePath) || /^[a-zA-Z]:[\\/]/.test(relativePath)) {
+    return { ok: false, reason: 'Absolute outbound paths are not allowed' };
+  }
+
+  const lexicalWorkingDirectory = resolve(workingDirectory);
+  if (resolve(lexicalWorkingDirectory, relativePath) === lexicalWorkingDirectory) {
+    return { ok: false, reason: 'Path points to a directory' };
+  }
+
+  const absoluteWorkingDirectory = realpathSync(lexicalWorkingDirectory);
+  const absolutePath = normalize(resolve(lexicalWorkingDirectory, relativePath));
+  const segments = normalize(relativePath).split(sep).filter(Boolean);
+  let currentPath = absoluteWorkingDirectory;
+
+  for (let index = 0; index < segments.length; index += 1) {
+    const segment = segments[index];
+    currentPath = resolve(currentPath, segment);
+
+    if (!existsSync(currentPath)) {
+      break;
+    }
+
+    const isLastSegment = index === segments.length - 1;
+    if (!isLastSegment && !statSync(currentPath).isDirectory()) {
+      return { ok: false, reason: 'Path escapes the working directory' };
+    }
+
+    const realCurrentPath = realpathSync(currentPath);
+    if (!isInsideWorkingDirectory(absoluteWorkingDirectory, realCurrentPath)) {
+      return { ok: false, reason: 'Path escapes the working directory' };
+    }
+
+    currentPath = realCurrentPath;
+  }
+
+  if (existsSync(absolutePath) && statSync(absolutePath).isDirectory()) {
+    return { ok: false, reason: 'Path points to a directory' };
+  }
+
+  return {
+    ok: true,
+    relativePath,
+    absolutePath
+  };
+}

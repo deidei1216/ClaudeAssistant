@@ -1,4 +1,7 @@
+import { statSync } from 'node:fs';
+import { basename, relative, resolve, sep } from 'node:path';
 import { spawn } from 'node:child_process';
+import { extractFileMarkers, resolveOutboundAttachment } from './attachments';
 import { AgentExecutor, AgentMessage, AgentResponse, SessionProfile } from './types';
 
 interface ClaudePrintResult {
@@ -97,8 +100,42 @@ export class ClaudeCodeWorker implements AgentExecutor {
       args.push('--append-system-prompt', session.customSystemPrompt);
     }
 
-    args.push(message.content);
+    args.push(this.buildPrompt(session, message));
     return args;
+  }
+
+  private buildPrompt(session: SessionProfile, message: AgentMessage): string {
+    if (!message.attachments?.length) {
+      return message.content;
+    }
+
+    const manifest = message.attachments
+      .map((attachment) => {
+        const location = attachment.localPath && this.isInsideWorkingDirectory(session.workingDirectory, attachment.localPath)
+          ? relative(session.workingDirectory, attachment.localPath)
+          : attachment.url;
+        return `- name: ${attachment.name} | type: ${attachment.type} | size: ${attachment.size} bytes | location: ${location}`;
+      })
+      .join('\n');
+
+    return [
+      message.content,
+      '',
+      'Attached files:',
+      manifest,
+      '',
+      'If you want Discord to receive a local file, include [[file:relative/path/from-working-directory]] on its own line in your final answer.'
+    ].join('\n');
+  }
+
+  private isInsideWorkingDirectory(workingDirectory: string, candidatePath: string): boolean {
+    const absoluteWorkingDirectory = resolve(workingDirectory);
+    const absoluteCandidatePath = resolve(candidatePath);
+
+    return (
+      absoluteCandidatePath === absoluteWorkingDirectory ||
+      absoluteCandidatePath.startsWith(`${absoluteWorkingDirectory}${sep}`)
+    );
   }
 
   private shouldRetryWithResume(
@@ -125,17 +162,73 @@ export class ClaudeCodeWorker implements AgentExecutor {
     }
 
     const parsed = this.parseClaudeOutput(result.stdout, args, cwd);
+    const { content, attachments } = this.parseOutboundAttachments(parsed.result?.trim() ?? '', cwd);
 
     return {
-      content: parsed.result?.trim() ?? '',
+      content,
+      attachments: attachments.length > 0 ? attachments : undefined,
       replyTo
+    };
+  }
+
+  private parseOutboundAttachments(content: string, workingDirectory: string): Pick<AgentResponse, 'content' | 'attachments'> {
+    const { content: strippedContent, markers } = extractFileMarkers(content);
+    const attachments: NonNullable<AgentResponse['attachments']> = [];
+    const errors: string[] = [];
+
+    for (const marker of markers) {
+      const resolved = resolveOutboundAttachment(workingDirectory, marker);
+      if (!resolved.ok) {
+        errors.push(`Could not attach ${marker}: ${resolved.reason}.`);
+        continue;
+      }
+
+      try {
+        const fileStat = statSync(resolved.absolutePath);
+        if (!fileStat.isFile()) {
+          errors.push(`Could not attach ${marker}: Path points to a directory.`);
+          continue;
+        }
+
+        attachments.push({
+          id: `outbound:${resolved.relativePath}`,
+          name: basename(resolved.absolutePath),
+          type: 'application/octet-stream',
+          size: fileStat.size,
+          url: resolved.absolutePath,
+          localPath: resolved.absolutePath
+        });
+      } catch {
+        errors.push(`Could not attach ${marker}: File does not exist.`);
+      }
+    }
+
+    const visibleContent = [strippedContent.trim(), ...errors].filter(Boolean).join('\n\n');
+
+    return {
+      content: visibleContent,
+      attachments
     };
   }
 
   private parseClaudeOutput(stdout: string, args: string[], cwd: string): ClaudePrintResult {
     try {
-      return JSON.parse(stdout) as ClaudePrintResult;
+      const parsed = JSON.parse(stdout) as ClaudePrintResult;
+      if (typeof parsed.result !== 'string') {
+        throw new ClaudeExecutionError('Claude returned an invalid result payload', {
+          args,
+          cwd,
+          exitCode: 0,
+          stdout,
+          stderr: `Unexpected result type: ${parsed.result === undefined ? 'missing' : typeof parsed.result}`
+        });
+      }
+      return parsed;
     } catch (error) {
+      if (error instanceof ClaudeExecutionError) {
+        throw error;
+      }
+
       throw new ClaudeExecutionError('Claude returned invalid JSON output', {
         args,
         cwd,
