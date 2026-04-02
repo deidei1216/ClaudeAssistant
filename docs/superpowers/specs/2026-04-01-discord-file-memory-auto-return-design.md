@@ -1,333 +1,290 @@
-# Discord Auto-Delivery And File Memory Design
+# Claude Code Native File Return Design
 
 ## Summary
 
-This design extends the current Discord attachment bridge so file delivery becomes a natural result of the task instead of a user-visible protocol.
+This design treats the gateway workspace itself as a Claude Code project and lets Claude Code's native mechanisms carry the decision-making for file return.
 
-The core shift is:
+The previous direction was still too gateway-centric:
 
-- **primary decision:** should this turn automatically deliver a file result?
-- **secondary decision:** if yes, which file should be delivered?
-- **transport detail:** Claude still uses the hidden `[[file:...]]` marker internally, but the user never needs to see or type it
+- it moved rules out of per-turn prompt injection, but still kept the main delivery policy inside our application code
+- it made the gateway act like the primary decision layer for whether files should be sent
 
-This makes the system behave more like a real assistant:
+That is not the architecture we want.
 
-- edit an Excel file -> send back the edited Excel
-- generate a PPT or Word report -> send back the generated file
-- create an HTML deliverable -> send back the HTML
+The corrected direction is:
 
-Recent file memory remains important, but as a supporting mechanism for file selection, not the main trigger for delivery.
+- `CLAUDE.md` defines project-level delivery principles
+- native Claude Code hooks are the intended final trigger layer, but only after their real lifecycle wiring is validated in this project
+- skills and scripts implement the concrete artifact-selection, bundling, and packaging behavior
+- the gateway remains a bridge and execution assistant, not the primary decision-maker
+
+The gateway should help Claude Code operate across chat channels. It should not try to replace Claude Code's native project model.
 
 ## Goals
 
-- Let file-producing tasks automatically deliver their result back to Discord without requiring the user to explicitly say "发给我".
-- Keep the hidden marker protocol internal to the Claude-to-gateway handoff.
-- Preserve support for natural references like "刚才那个文件" or "再发一遍".
-- Keep the implementation small and aligned with the existing attachment bridge MVP.
+- Make file return feel like a natural Claude Code project behavior rather than a gateway-specific trick.
+- Let Claude Code own artifact-return decisions, including whether to send, bundle, compress, or ask for clarification.
+- Keep the gateway focused on channel delivery concerns such as upload, retry, status sync, and adapter behavior.
+- Preserve natural cross-turn references to prior artifacts through workspace memory rather than language-specific prompt examples.
+- Keep the design extensible across Discord, WeChat, Feishu, and similar chat-channel integrations.
 
 ## Non-Goals
 
-- No attempt to turn the gateway into a full asset management system.
-- No full-repository semantic indexing.
-- No deep Office-document understanding beyond file-level delivery logic.
-- No automatic delivery for every created file by default.
-- No change to outbound file safety rules.
+- No full security model in this iteration.
+- No path-access restriction layer beyond Claude Code's own execution environment and existing runtime behavior.
+- No gateway-owned delivery policy engine as the primary architecture.
+- No language-specific intent parser.
+- No hardcoded prompt examples to teach artifact references.
 
-## User Experience
+## Architectural Principle
 
-### Desired Experience
+For this project family, architecture should begin with one question:
 
-Users should be able to say things like:
+**Can Claude Code's native project mechanisms solve this first?**
 
-- "帮我改下这个 Excel"
-- "搜集这些信息，整理成 PPT"
-- "把结果导出成 Word"
-- "做一个 html 报告"
+If the answer is yes, we should prefer:
 
-and, if the task clearly implies a file deliverable, the assistant should return that file automatically when the work is done.
+- `CLAUDE.md`
+- hooks
+- skills
+- scripts
+- workspace memory files
 
-Users should also be able to say:
+and only then add gateway behavior for things Claude Code cannot reliably do on its own, such as:
 
-- "把刚才那个再发一遍"
-- "把刚才那个 html 给我"
-- "把那张图再发我一下"
+- channel upload and retry
+- adapter-specific formatting
+- message delivery bookkeeping
+- bridging between Claude output and external chat platforms
 
-without needing to know anything about internal markers or gateway mechanics.
+This is the primary design principle that should guide future features in this project.
 
-### Clarification Behavior
+## Core Model
 
-If there is not enough confidence about which file should be delivered, Claude should ask a short clarification question rather than guessing.
+The system should separate four concerns:
 
-Example:
+1. **Project-level decision rules**
+   What kinds of artifacts should normally be returned, bundled, summarized, or skipped.
 
-```text
-我这里有两个刚生成的 html：report.html 和 dashboard.html。你想要哪一个？
-```
+2. **Project-level execution hooks**
+   When the artifact-return process should run.
 
-## Decision Model
+3. **Project-level implementation logic**
+   How candidate artifacts are discovered, filtered, packaged, compressed, and prepared.
 
-The system should make delivery decisions in this order:
+4. **Gateway/channel delivery**
+   How prepared artifacts are uploaded and retried through Discord or other adapters.
 
-1. **Auto-delivery intent**
-   Determine whether the task naturally implies that a file should be returned.
-2. **Artifact resolution**
-   Determine which file best matches the task result.
-3. **Hidden transport**
-   Use the internal `[[file:...]]` marker to hand the chosen file to the gateway for Discord delivery.
+The first three should primarily live in the Claude Code project model.
 
-This ordering is important.
+The fourth should remain in the gateway.
 
-The system should not begin with "what recent file exists?" because that over-weights conversational references and under-weights task outcome.
+## Native Claude Code First
 
-## Auto-Delivery Intent
+### `CLAUDE.md`
 
-### High-Confidence Auto-Delivery Cases
+`CLAUDE.md` should be the stable home for project-wide delivery principles.
 
-The assistant should default toward returning a file when the task itself is obviously file-oriented.
+It should express ideas like:
+
+- the workspace is a Claude Code project, not just a transient prompt context
+- artifact return is decided semantically based on user intent and project state
+- default behavior should favor useful final deliverables, not every generated file
+- when result sets are large, Claude should prefer bundling, packaging, or summarizing
+- users may explicitly request paths outside the default workspace, and that is allowed for now
+- `[[file:...]]` remains an internal bridge marker for the gateway handoff
+
+These rules belong at the project level because they are not turn-specific.
+
+### Hooks
+
+Native Claude Code hooks are still the intended final trigger layer.
+
+However, this project should not claim hook integration is complete unless the real hook lifecycle event names, config format, and `claude --print` behavior are validated end-to-end in this repository.
+
+Until that validation exists:
+
+- skill-local scripts may be staged in the repository
+- `CLAUDE.md` may describe the intended final behavior
+- but bridge code must not manually invoke those scripts
+- and this repository should not ship a simulated hook entrypoint as a substitute for validated native hook wiring
+
+### Skills And Scripts
+
+Skills and scripts should implement the actual artifact-return workflow.
+
+Responsibilities include:
+
+- inspect recent files and current outputs
+- decide whether the result is a single file, a set, or an archive candidate
+- compress large result sets into a zip when appropriate
+- generate a clean outbox artifact when multiple outputs should be bundled
+- choose whether to send an existing file directly or package it first
+
+The skill layer is the right place for concrete logic because it is:
+
+- reusable
+- inspectable
+- explicit
+- closer to Claude Code's operating model than gateway-owned policy code
+
+## Workspace And Memory Model
+
+### Default Workspace Behavior
+
+The default behavior is still that Claude Code works inside the current session workspace.
+
+That remains the normal path because it keeps project state coherent and predictable.
+
+### Access Outside The Workspace
+
+This iteration does not impose additional gateway-owned path restrictions.
+
+If the user explicitly wants Claude Code to read or produce artifacts outside the default workspace, that should be treated as valid project behavior for now.
 
 Examples:
 
-- the user uploads an Excel, Word, PPT, PDF, image, or similar file and asks for edits, fixes, cleanup, conversion, or enrichment
-- the user explicitly asks to generate a file deliverable such as:
-  - html
-  - docx / word
-  - xlsx / excel
-  - pptx / ppt
-  - pdf
-  - csv
-  - markdown report
-- Claude clearly creates a single user-facing output artifact during the current turn
+- desktop files
+- downloads
+- another local project path
 
-In these cases, returning the resulting file should be treated as the default expected behavior.
+Security hardening for path restrictions is deferred to a separate future security-specific design.
 
-### Low-Confidence Or No Auto-Delivery Cases
+### Session Memory
 
-The assistant should not auto-deliver when the task is primarily:
+Dynamic state should still be mirrored into workspace-visible memory files under `.claude-gateway/`.
 
-- pure Q&A
-- explanation or analysis only
-- code discussion with no user-facing output file
-- an ambiguous multi-output turn with no clear primary artifact
+The most important file remains:
 
-In these cases, no file is sent unless the user clearly asks for one.
+- `.claude-gateway/memory/recent-files.json`
 
-## Artifact Resolution
+This is supporting context for Claude Code, future native hooks, and skill-local scripts.
 
-Once auto-delivery intent is established, the system needs to resolve the target artifact.
+It should help with:
 
-Priority order:
+- resolving prior-artifact references
+- remembering inbound files
+- remembering prior outbound deliverables
+- choosing whether to reuse, regenerate, or bundle artifacts
 
-1. single newly created or modified file from the current turn that clearly matches the requested deliverable type
-2. single inbound file that was just edited or transformed
-3. recent file memory candidates that strongly match the user request
-4. clarification when multiple candidates remain plausible
+## File Return Flow
 
-This means the first-class path is:
+The intended flow becomes:
 
-- task result drives file resolution
+1. User sends a request through a chat channel.
+2. Gateway normalizes inbound files and updates workspace-visible memory.
+3. Claude Code works as if it is inside a normal project.
+4. Validated native Claude Code hooks should eventually decide whether artifact-return logic should run.
+5. Skills/scripts inspect outputs and prepare the deliverable:
+   - direct file
+   - bundled archive
+   - packaged output
+   - or no attachment
+6. Claude emits the bridge handoff marker for the prepared deliverable.
+7. Gateway uploads the prepared file through the adapter and handles retry/platform concerns.
 
-and only then:
+In this model, the gateway does not primarily decide the delivery policy. It executes the transport.
 
-- recent-file memory helps disambiguate or recover conversational references
+## Role Of The Gateway
 
-## Recent File Memory
+The gateway should remain responsible for:
 
-Recent file memory remains part of the design, but its role changes.
+- inbound attachment normalization
+- session working-directory setup
+- workspace memory mirroring
+- adapter-specific upload
+- message send retry and delivery failure handling
+- channel/platform bookkeeping
 
-It is now a support layer for:
+The gateway should not be the primary home for:
 
-- "刚才那个文件"
-- "再发一遍"
-- "那个 html"
-- "你刚改好的 Excel"
+- deciding whether a file is worth sending
+- deciding whether to zip a large result set
+- deciding whether to compress, package, or bundle artifacts
+- teaching Claude how to reason about artifact return
 
-It should not be the primary reason a file is sent.
+Those belong to Claude Code project mechanisms.
 
-### Remembered File Record
+## Role Of The Worker
 
-Each file record should contain:
+The worker should stay minimal.
 
-- `id`
-- `displayName`
-- `relativePath`
-- `absolutePath`
-- `source`
-  - `discord_inbound`
-  - `claude_outbound`
-  - `workspace_detected`
-- `mediaType`
-- `lastSeenAt`
-- `summary`
+It should:
 
-The memory should be capped to a small recent window such as the latest 10 files per session.
+- pass through the actual user message
+- include current-turn attachment manifest when needed
+- preserve support for the internal file handoff marker
+- avoid embedding repeated delivery-policy rules into prompt content
 
-### Sources Of Remembered Files
+The worker should not become a policy engine.
 
-#### 1. Discord Inbound
+## Packaging And Bundling
 
-Any successfully downloaded inbound attachment should be remembered.
+Large result sets should be handled by Claude Code logic, not primarily by gateway policy code.
 
-#### 2. Successful Outbound Delivery
+Examples:
 
-Any file successfully sent to Discord should be refreshed in memory.
+- many HTML files -> package them into a zip if that is the best deliverable
+- multiple related exports -> create a single archive or clean output folder artifact
+- mixed outputs -> choose one user-facing bundle rather than spamming attachments
 
-This supports:
+This is a strong example of why project hooks and scripts are more appropriate than a narrow gateway-side policy module.
 
-- "再发一遍"
-- "把上一个文件再给我"
+## Transport Marker
 
-#### 3. Workspace-Detected Outputs
+`[[file:...]]` remains useful, but only as an internal bridge transport marker.
 
-This should remain conservative.
+It should be treated as:
 
-Only remember workspace files when both are true:
+- an implementation detail between Claude Code and the gateway
+- not the place where delivery policy is defined
+- not something users need to know or type
 
-- the file was newly created or modified during the current turn
-- the file is clearly the intended result artifact or is explicitly referenced in Claude's visible response
+The marker is the handoff, not the architecture.
 
-This covers natural outputs like:
+## Design Principles
 
-- `report.html`
-- `slides.pptx`
-- `budget.xlsx`
-- `summary.docx`
+### 1. Claude Code Decides, Gateway Delivers
 
-without scanning the whole repository indiscriminately.
+When possible, Claude Code should decide artifact-return behavior through project rules, hooks, and scripts.
 
-## Prompt Contract
+The gateway should deliver what Claude prepared.
 
-The worker should inject a hidden return instruction on every turn, not only when the current user message has attachments.
+### 2. Native Mechanisms Beat Simulated Mechanisms
 
-That instruction should tell Claude:
+If Claude Code already has a native mechanism for project behavior, we should use that before inventing a gateway-owned substitute.
 
-- when a file result should be returned to the user, emit `[[file:relative/path]]` on its own line
-- treat file-return as the default for clearly file-producing tasks
-- use recent file memory to resolve references like "刚才那个" or "再发一遍"
-- avoid asking the user for a path when a high-confidence file candidate already exists
-- ask for clarification rather than guessing if multiple plausible files exist
+### 3. Keep The Bridge Thin
 
-The worker should also inject a compact recent-files summary when any remembered files exist.
+The bridge layer should stay focused on integration concerns, not expand into the primary product logic.
 
-Example:
+### 4. Defer Security Specialization
 
-```text
-Recent files in this session:
-- inbound image: .claude-gateway/inbox/1488.../image.png
-- generated html: outputs/report.html
-- last sent excel: exports/budget.xlsx
-```
-
-## Safety Rules
-
-The current outbound safety model remains in force:
-
-- only files inside `session.workingDirectory` may be sent
-- inline markers and markers inside code fences remain ignored
-- malformed or unsafe paths remain blocked
-
-Additional guardrails:
-
-- auto-delivery should only happen when there is high confidence that the file is the natural task result
-- recent file memory must not trigger delivery unless the task or user intent supports it
-- if multiple plausible artifacts exist, the assistant must clarify
-- if the user explicitly says not to send or export a file, auto-delivery is disabled for that turn
-
-## Storage Strategy
-
-Do not introduce a new database.
-
-The first implementation should reuse session persistence by extending the session state with a compact `recentFiles` field, or a closely adjacent persisted state file if that yields cleaner boundaries.
-
-The recommended path is to extend session persistence because the project already stores per-channel session state there.
-
-## Component Changes
-
-### `src/core/types.ts`
-
-Add a recent-file type and attach it to persisted session state.
-
-### Session persistence layer
-
-Persist and load recent file memory with session state.
-
-### `src/core/gateway.ts`
-
-Register inbound attachments after they are normalized into the true session working directory.
-
-### `src/core/worker.ts`
-
-Always inject the hidden file-return instruction.
-
-When recent files exist, inject a compact recent-files summary block.
-
-The worker should also be the place where result-artifact context is passed to Claude in a minimal, structured way.
-
-### Artifact detection path
-
-Add a small mechanism to register newly created or modified files from the current turn when they are clearly the intended result artifact.
-
-This should stay conservative and avoid whole-directory noise.
-
-### Discord send path
-
-Refresh recent-file metadata after successful outbound sends.
+Path restrictions and other security-hardening rules should be designed in a dedicated security pass, not prematurely mixed into this workflow design.
 
 ## Testing Strategy
 
-### Unit Tests
+### Project Behavior Tests
 
-- worker injects hidden return instructions every turn, even with no current attachments
-- worker injects recent-file summaries when memory exists
-- session persistence includes recent file memory
-- inbound attachments register into recent-file memory
-- successful outbound deliveries refresh recent-file memory
+- `CLAUDE.md` and hook behavior produce the expected artifact-return decisions
+- scripts correctly select, bundle, or compress artifacts
+- recent-file memory remains useful for semantic follow-ups
+- explicit path requests outside the default workspace continue to work
 
-### Behavioral Tests
+### Gateway Tests
 
-- after uploading an Excel and asking for edits, the resulting Excel is automatically returned without the user explicitly saying "发给我"
-- after asking for an HTML report, the generated HTML is automatically returned
-- after asking for a PPT or Word deliverable, the produced file is automatically returned
-- after a prior successful send, "再发一遍" resolves to the last delivered file
-- when two candidate output files exist, Claude asks for clarification instead of guessing
-
-## Trade-Offs
-
-### Why keep the hidden marker
-
-The hidden marker remains the safest deterministic handoff from Claude to the gateway.
-
-The product problem is not the existence of the marker. The product problem is forcing the user to type it.
-
-This design solves that by hiding the marker behind prompt and memory logic.
-
-### Why not auto-send every created file
-
-That would feel convenient at first, but it would quickly create noise and accidental deliveries.
-
-The better rule is:
-
-- automatically deliver when the task clearly implies a file result
-- otherwise require explicit or contextually clear intent
+- inbound files are normalized correctly
+- prepared outbound artifacts are uploaded correctly
+- retry and adapter failure behavior remains correct
+- internal file markers still bridge artifacts to adapters
 
 ## Success Criteria
 
-This enhancement is successful if:
+This redesign is successful if:
 
-- users no longer need to type `[[file:...]]`
-- file-producing tasks automatically return their natural output artifacts
-- recent file memory supports conversational references like "刚才那个文件" and "再发一遍"
-- ambiguous cases result in clarification rather than guessing
-- existing safety protections still hold
-- the behavior is covered by automated tests and a short manual validation flow
-
-## Implementation Scope
-
-The first implementation should stay focused:
-
-- automatic hidden return instruction on every turn
-- recent file memory for the latest few files per session
-- registration of inbound attachments and successful outbound deliveries
-- conservative registration of current-turn output artifacts
-- auto-delivery only for high-confidence file-result tasks
-
-This is enough to validate the product direction without overbuilding a general asset orchestration system.
+- artifact-return decisions primarily live in Claude Code project mechanisms
+- the gateway becomes a delivery assistant rather than a policy owner
+- `CLAUDE.md`, validated native hooks, and skills/scripts form the main decision stack
+- large or multi-file results can be bundled or zipped by project logic
+- users can explicitly work outside the default workspace when needed
+- the design is extensible across multiple chat-channel adapters without cloning policy logic into each one

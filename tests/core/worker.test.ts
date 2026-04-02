@@ -57,9 +57,10 @@ describe('ClaudeCodeWorker', () => {
 
     const response = await worker.execute(session, message);
 
-    expect(runner).toHaveBeenCalledWith(
-        'claude',
-      [
+    expect(runner).toHaveBeenCalledTimes(1);
+    expect(runner.mock.calls[0]?.[0]).toBe('claude');
+    expect(runner.mock.calls[0]?.[1]).toEqual(
+      expect.arrayContaining([
         '--print',
         '--output-format',
         'json',
@@ -77,11 +78,11 @@ describe('ClaudeCodeWorker', () => {
         '--disallowedTools',
         'Bash(rm:*)',
         '--append-system-prompt',
-        'Stay concise.',
-        'Summarize the latest commit.'
-      ],
-      { cwd: '/tmp/project' }
+        'Stay concise.'
+      ])
     );
+    expect(runner.mock.calls[0]?.[1]?.at(-1)).toContain('Summarize the latest commit.');
+    expect(runner.mock.calls[0]?.[2]).toEqual({ cwd: '/tmp/project' });
     expect(response.content).toBe('done');
   });
 
@@ -121,9 +122,10 @@ describe('ClaudeCodeWorker', () => {
 
     const response = await worker.execute(session, message);
 
-    expect(runner).toHaveBeenCalledWith(
-        'claude',
-      [
+    expect(runner).toHaveBeenCalledTimes(1);
+    expect(runner.mock.calls[0]?.[0]).toBe('claude');
+    expect(runner.mock.calls[0]?.[1]).toEqual(
+      expect.arrayContaining([
         '--print',
         '--output-format',
         'json',
@@ -132,13 +134,113 @@ describe('ClaudeCodeWorker', () => {
         '--model',
         'sonnet',
         '--permission-mode',
-        'default',
-        'Hello'
-      ],
-      { cwd: '/home/user/project' }
+        'default'
+      ])
     );
+    expect(runner.mock.calls[0]?.[1]?.at(-1)).toContain('Hello');
+    expect(runner.mock.calls[0]?.[2]).toEqual({ cwd: '/home/user/project' });
     expect(response.content).toBe('response');
     expect(response.replyTo).toBe('msg-2');
+  });
+
+  it('passes through a minimal prompt when the turn has no attachments', async () => {
+    const runner = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        type: 'result',
+        subtype: 'success',
+        is_error: false,
+        result: 'done',
+        session_id: 'worker-session'
+      }),
+      stderr: '',
+      exitCode: 0
+    });
+    const worker = new ClaudeCodeWorker(runner);
+    const session: SessionProfile = {
+      id: 'worker-session',
+      channelId: 'channel-1',
+      channelType: 'discord',
+      model: 'sonnet',
+      workingDirectory: '/tmp/project',
+      permissionMode: 'auto',
+      createdAt: new Date('2026-04-01T00:00:00.000Z'),
+      lastActiveAt: new Date('2026-04-01T00:00:00.000Z'),
+      status: 'active',
+      messageCount: 0,
+    };
+
+    const message: AgentMessage = {
+      id: 'msg-1',
+      channelId: 'channel-1',
+      channelType: 'discord',
+      userId: 'user-1',
+      content: '帮我做一个 html 报告',
+      timestamp: new Date('2026-04-01T00:00:00.000Z')
+    };
+
+    await worker.execute(session, message);
+
+    const prompt = runner.mock.calls[0]?.[1]?.at(-1);
+
+    expect(prompt).toBe(message.content);
+    expect(prompt).not.toContain('Hidden file-return instructions:');
+    expect(prompt).not.toContain('Recent files in this session:');
+  });
+
+  it('keeps the prompt minimal even when session memory exists', async () => {
+    const runner = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        type: 'result',
+        subtype: 'success',
+        is_error: false,
+        result: 'done',
+        session_id: 'worker-session'
+      }),
+      stderr: '',
+      exitCode: 0
+    });
+    const worker = new ClaudeCodeWorker(runner);
+    const session: SessionProfile = {
+      id: 'worker-session',
+      channelId: 'channel-1',
+      channelType: 'discord',
+      model: 'sonnet',
+      workingDirectory: '/tmp/project',
+      permissionMode: 'auto',
+      createdAt: new Date('2026-04-01T00:00:00.000Z'),
+      lastActiveAt: new Date('2026-04-01T00:00:00.000Z'),
+      status: 'active',
+      messageCount: 0,
+      recentFiles: [
+        {
+          id: 'file-1',
+          displayName: 'report.html',
+          relativePath: 'outputs/report.html',
+          absolutePath: '/tmp/project/outputs/report.html',
+          source: 'claude_outbound',
+          mediaType: 'text/html',
+          lastSeenAt: new Date('2026-04-01T00:00:00.000Z'),
+          summary: 'last sent html'
+        }
+      ]
+    };
+
+    const message: AgentMessage = {
+      id: 'msg-2',
+      channelId: 'channel-1',
+      channelType: 'discord',
+      userId: 'user-1',
+      content: '把刚才那个再发一遍',
+      timestamp: new Date('2026-04-01T00:01:00.000Z')
+    };
+
+    await worker.execute(session, message);
+
+    const prompt = runner.mock.calls[0]?.[1]?.at(-1);
+
+    expect(prompt).toBe(message.content);
+    expect(prompt).not.toContain('Recent files in this session:');
+    expect(prompt).not.toContain('last sent html');
   });
 
   it('adds an attachment manifest to the prompt when attachments are present', async () => {
@@ -195,9 +297,7 @@ describe('ClaudeCodeWorker', () => {
     expect(prompt).toContain('image/png');
     expect(prompt).toContain('1234 bytes');
     expect(prompt).toContain('assets/mockup.png');
-    expect(prompt).toContain(
-      'If you want Discord to receive a local file, include [[file:relative/path/from-working-directory]] on its own line in your final answer.'
-    );
+    expect(prompt).not.toContain('Hidden file-return instructions:');
   });
 
   it('falls back to a safe attachment location when localPath escapes the working directory', async () => {
@@ -344,6 +444,230 @@ describe('ClaudeCodeWorker', () => {
     ]);
   });
 
+  it('returns workspace-detected recent file candidates for newly created referenced artifacts', async () => {
+    const workingDirectory = mkdtempSync(join(tmpdir(), 'worker-artifacts-'));
+    tempDirectories.push(workingDirectory);
+    const artifactPath = join(workingDirectory, 'outputs', 'report.html');
+
+    const runner = vi.fn().mockImplementation(async () => {
+      mkdirSync(join(workingDirectory, 'outputs'), { recursive: true });
+      writeFileSync(artifactPath, '<html>report</html>');
+
+      return {
+        stdout: JSON.stringify({
+          type: 'result',
+          subtype: 'success',
+          is_error: false,
+          result: 'Saved the report to outputs/report.html',
+          session_id: 'artifact-session'
+        }),
+        stderr: '',
+        exitCode: 0
+      };
+    });
+
+    const worker = new ClaudeCodeWorker(runner);
+    const session: SessionProfile = {
+      id: 'artifact-session',
+      channelId: 'channel-1',
+      channelType: 'discord',
+      model: 'sonnet',
+      workingDirectory,
+      permissionMode: 'auto',
+      createdAt: new Date('2026-04-01T00:00:00.000Z'),
+      lastActiveAt: new Date('2026-04-01T00:00:00.000Z'),
+      status: 'active',
+      messageCount: 0,
+      recentFiles: []
+    };
+
+    const response = await worker.execute(session, {
+      id: 'msg-1',
+      channelId: 'channel-1',
+      channelType: 'discord',
+      userId: 'user-1',
+      content: '做一个 html 报告',
+      timestamp: new Date('2026-04-01T00:00:00.000Z')
+    });
+
+    expect(response.metadata?.recentFileCandidates).toEqual([
+      expect.objectContaining({
+        source: 'workspace_detected',
+        relativePath: 'outputs/report.html',
+        summary: 'generated html'
+      })
+    ]);
+  });
+
+  it('tracks doc and ppt artifacts when they are newly created and referenced', async () => {
+    const workingDirectory = mkdtempSync(join(tmpdir(), 'worker-artifacts-'));
+    tempDirectories.push(workingDirectory);
+    const docPath = join(workingDirectory, 'outputs', 'summary.doc');
+    const pptPath = join(workingDirectory, 'outputs', 'slides.ppt');
+
+    const runner = vi.fn().mockImplementation(async () => {
+      mkdirSync(join(workingDirectory, 'outputs'), { recursive: true });
+      writeFileSync(docPath, 'doc bytes');
+      writeFileSync(pptPath, 'ppt bytes');
+
+      return {
+        stdout: JSON.stringify({
+          type: 'result',
+          subtype: 'success',
+          is_error: false,
+          result: 'Created outputs/summary.doc and outputs/slides.ppt',
+          session_id: 'artifact-session'
+        }),
+        stderr: '',
+        exitCode: 0
+      };
+    });
+
+    const worker = new ClaudeCodeWorker(runner);
+    const session: SessionProfile = {
+      id: 'artifact-session',
+      channelId: 'channel-1',
+      channelType: 'discord',
+      model: 'sonnet',
+      workingDirectory,
+      permissionMode: 'auto',
+      createdAt: new Date('2026-04-01T00:00:00.000Z'),
+      lastActiveAt: new Date('2026-04-01T00:00:00.000Z'),
+      status: 'active',
+      messageCount: 0,
+      recentFiles: []
+    };
+
+    const response = await worker.execute(session, {
+      id: 'msg-doc-ppt',
+      channelId: 'channel-1',
+      channelType: 'discord',
+      userId: 'user-1',
+      content: 'create a word doc and slide deck',
+      timestamp: new Date('2026-04-01T00:00:00.000Z')
+    });
+
+    expect(response.metadata?.recentFileCandidates).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          relativePath: 'outputs/summary.doc'
+        }),
+        expect.objectContaining({
+          relativePath: 'outputs/slides.ppt'
+        })
+      ])
+    );
+  });
+
+  it('tracks json and txt artifacts when they are newly created and referenced', async () => {
+    const workingDirectory = mkdtempSync(join(tmpdir(), 'worker-artifacts-'));
+    tempDirectories.push(workingDirectory);
+    const jsonPath = join(workingDirectory, 'outputs', 'report.json');
+    const textPath = join(workingDirectory, 'outputs', 'notes.txt');
+
+    const runner = vi.fn().mockImplementation(async () => {
+      mkdirSync(join(workingDirectory, 'outputs'), { recursive: true });
+      writeFileSync(jsonPath, '{"ok":true}');
+      writeFileSync(textPath, 'notes');
+
+      return {
+        stdout: JSON.stringify({
+          type: 'result',
+          subtype: 'success',
+          is_error: false,
+          result: 'Created outputs/report.json and outputs/notes.txt',
+          session_id: 'artifact-session'
+        }),
+        stderr: '',
+        exitCode: 0
+      };
+    });
+
+    const worker = new ClaudeCodeWorker(runner);
+    const session: SessionProfile = {
+      id: 'artifact-session',
+      channelId: 'channel-1',
+      channelType: 'discord',
+      model: 'sonnet',
+      workingDirectory,
+      permissionMode: 'auto',
+      createdAt: new Date('2026-04-01T00:00:00.000Z'),
+      lastActiveAt: new Date('2026-04-01T00:00:00.000Z'),
+      status: 'active',
+      messageCount: 0,
+      recentFiles: []
+    };
+
+    const response = await worker.execute(session, {
+      id: 'msg-json-txt',
+      channelId: 'channel-1',
+      channelType: 'discord',
+      userId: 'user-1',
+      content: 'create a json report and text notes',
+      timestamp: new Date('2026-04-01T00:00:00.000Z')
+    });
+
+    expect(response.metadata?.recentFileCandidates).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          relativePath: 'outputs/report.json'
+        }),
+        expect.objectContaining({
+          relativePath: 'outputs/notes.txt'
+        })
+      ])
+    );
+  });
+
+  it('does not remember changed files that are not referenced in Claude output', async () => {
+    const workingDirectory = mkdtempSync(join(tmpdir(), 'worker-artifacts-'));
+    tempDirectories.push(workingDirectory);
+    const artifactPath = join(workingDirectory, 'outputs', 'report.html');
+
+    const runner = vi.fn().mockImplementation(async () => {
+      mkdirSync(join(workingDirectory, 'outputs'), { recursive: true });
+      writeFileSync(artifactPath, '<html>report</html>');
+
+      return {
+        stdout: JSON.stringify({
+          type: 'result',
+          subtype: 'success',
+          is_error: false,
+          result: 'Finished the analysis.',
+          session_id: 'artifact-session'
+        }),
+        stderr: '',
+        exitCode: 0
+      };
+    });
+
+    const worker = new ClaudeCodeWorker(runner);
+    const session: SessionProfile = {
+      id: 'artifact-session',
+      channelId: 'channel-1',
+      channelType: 'discord',
+      model: 'sonnet',
+      workingDirectory,
+      permissionMode: 'auto',
+      createdAt: new Date('2026-04-01T00:00:00.000Z'),
+      lastActiveAt: new Date('2026-04-01T00:00:00.000Z'),
+      status: 'active',
+      messageCount: 0,
+      recentFiles: []
+    };
+
+    const response = await worker.execute(session, {
+      id: 'msg-1',
+      channelId: 'channel-1',
+      channelType: 'discord',
+      userId: 'user-1',
+      content: '做一个 html 报告',
+      timestamp: new Date('2026-04-01T00:00:00.000Z')
+    });
+
+    expect(response.metadata?.recentFileCandidates).toBeUndefined();
+  });
+
   it('does not treat inline file markers in prose as outbound attachments', async () => {
     const workingDirectory = mkdtempSync(join(tmpdir(), 'claude-worker-'));
     tempDirectories.push(workingDirectory);
@@ -479,6 +803,78 @@ describe('ClaudeCodeWorker', () => {
     expect(response.replyTo).toBe('msg-outbound-error');
     expect(response.content).toContain('I could not attach that file.');
     expect(response.content).toContain('Could not attach ../../secret.txt');
+  });
+
+  it('does not invoke file-return scripts when Claude does not emit a marker', async () => {
+    const workingDirectory = mkdtempSync(join(tmpdir(), 'claude-worker-hook-'));
+    tempDirectories.push(workingDirectory);
+    mkdirSync(join(workingDirectory, '.claude-gateway', 'outbox'), { recursive: true });
+    mkdirSync(join(workingDirectory, '.claude-gateway', 'memory'), { recursive: true });
+    const artifactPath = join(workingDirectory, '.claude-gateway', 'outbox', 'cropped-image.png');
+    writeFileSync(artifactPath, 'png bytes');
+    writeFileSync(
+      join(workingDirectory, '.claude-gateway', 'memory', 'recent-files.json'),
+      JSON.stringify({
+        recentFiles: [
+          {
+            id: 'workspace:.claude-gateway/outbox/cropped-image.png',
+            displayName: 'cropped-image.png',
+            relativePath: '.claude-gateway/outbox/cropped-image.png',
+            absolutePath: artifactPath,
+            source: 'workspace_detected',
+            mediaType: 'image/png',
+            lastSeenAt: '2026-04-02T00:00:00.000Z',
+            summary: 'generated image'
+          }
+        ]
+      })
+    );
+
+    const runner = vi.fn().mockImplementation(async (command: string) => {
+      if (command !== 'claude') {
+        throw new Error(`Unexpected command: ${command}`);
+      }
+
+      return {
+        stdout: JSON.stringify({
+          type: 'result',
+          subtype: 'success',
+          is_error: false,
+          result: '已经裁剪好了。',
+          session_id: 'attachment-session'
+        }),
+        stderr: '',
+        exitCode: 0
+      };
+    });
+    const worker = new ClaudeCodeWorker(runner);
+    const session: SessionProfile = {
+      id: 'attachment-session',
+      channelId: 'channel-outbound',
+      channelType: 'discord',
+      model: 'sonnet',
+      workingDirectory,
+      permissionMode: 'auto',
+      createdAt: new Date(),
+      lastActiveAt: new Date(),
+      status: 'active',
+      messageCount: 0
+    };
+    const message: AgentMessage = {
+      id: 'msg-hook-attachment',
+      channelId: 'channel-outbound',
+      channelType: 'discord',
+      userId: 'user-outbound',
+      content: '把图片直接发给我',
+      timestamp: new Date()
+    };
+
+    const response = await worker.execute(session, message);
+
+    expect(response.content).toBe('已经裁剪好了。');
+    expect(response.attachments).toBeUndefined();
+    expect(runner).toHaveBeenCalledTimes(1);
+    expect(runner.mock.calls[0]?.[0]).toBe('claude');
   });
 
   it('throws a helpful error when Claude returns invalid JSON output', async () => {
@@ -629,18 +1025,38 @@ describe('ClaudeCodeWorker', () => {
     const response = await worker.execute(session, message);
 
     expect(response.content).toBe('recovered via resume');
-    expect(runner).toHaveBeenNthCalledWith(
-      1,
-      'claude',
-      ['--print', '--output-format', 'json', '--session-id', 'reused-session', '--model', 'sonnet', '--permission-mode', 'auto', 'hello'],
-      { cwd: '/tmp' }
+    expect(runner.mock.calls[0]?.[0]).toBe('claude');
+    expect(runner.mock.calls[0]?.[1]).toEqual(
+      expect.arrayContaining([
+        '--print',
+        '--output-format',
+        'json',
+        '--session-id',
+        'reused-session',
+        '--model',
+        'sonnet',
+        '--permission-mode',
+        'auto'
+      ])
     );
-    expect(runner).toHaveBeenNthCalledWith(
-      2,
-      'claude',
-      ['--print', '--output-format', 'json', '--resume', 'reused-session', '--model', 'sonnet', '--permission-mode', 'auto', 'hello'],
-      { cwd: '/tmp' }
+    expect(runner.mock.calls[0]?.[1]?.at(-1)).toContain('hello');
+    expect(runner.mock.calls[0]?.[2]).toEqual({ cwd: '/tmp' });
+    expect(runner.mock.calls[1]?.[0]).toBe('claude');
+    expect(runner.mock.calls[1]?.[1]).toEqual(
+      expect.arrayContaining([
+        '--print',
+        '--output-format',
+        'json',
+        '--resume',
+        'reused-session',
+        '--model',
+        'sonnet',
+        '--permission-mode',
+        'auto'
+      ])
     );
+    expect(runner.mock.calls[1]?.[1]?.at(-1)).toContain('hello');
+    expect(runner.mock.calls[1]?.[2]).toEqual({ cwd: '/tmp' });
   });
 
   it('throws error when claude CLI fails with stderr', async () => {
