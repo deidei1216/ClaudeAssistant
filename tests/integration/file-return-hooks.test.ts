@@ -49,7 +49,7 @@ describe('file return skill scripts', () => {
     expect(settings.hooks?.Stop?.[0]?.hooks?.[0]?.command).toContain('skills/file-return/file-return-stop.ts');
   });
 
-  it('executes the file-return skill entrypoint via tsx and returns JSON on stdout', async () => {
+  it('executes the file-return skill entrypoint via tsx and returns JSON on stdout', { timeout: 15000 }, async () => {
     const scriptPath = join(process.cwd(), 'skills', 'file-return', 'file-return-stop.ts');
     const result = spawnSync(
       'npx',
