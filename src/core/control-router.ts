@@ -13,9 +13,9 @@ export class ControlRouter {
     private readonly store: ControlStore,
     private readonly clock: () => Date = () => new Date(),
     private readonly logger: {
-      info?: (message: string, data?: unknown) => void;
-      warn?: (message: string, data?: unknown) => void;
-      error?: (message: string, data?: unknown) => void;
+      info?: (data: unknown, message: string) => void;
+      warn?: (data: unknown, message: string) => void;
+      error?: (data: unknown, message: string) => void;
     } = {}
   ) {}
 

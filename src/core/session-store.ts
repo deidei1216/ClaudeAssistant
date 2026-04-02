@@ -1,13 +1,17 @@
 import { mkdirSync, readFileSync, readdirSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { SessionProfile } from './types';
+import { RecentFileRecord, SessionProfile } from './types';
 
 function serialize(session: SessionProfile): string {
   return JSON.stringify(
     {
       ...session,
       createdAt: session.createdAt.toISOString(),
-      lastActiveAt: session.lastActiveAt.toISOString()
+      lastActiveAt: session.lastActiveAt.toISOString(),
+      recentFiles: session.recentFiles?.map((file) => ({
+        ...file,
+        lastSeenAt: file.lastSeenAt.toISOString()
+      }))
     },
     null,
     2
@@ -16,10 +20,18 @@ function serialize(session: SessionProfile): string {
 
 function deserialize(raw: string): SessionProfile {
   const parsed = JSON.parse(raw);
+  const recentFiles = parsed.recentFiles === undefined
+    ? undefined
+    : (parsed.recentFiles as RecentFileRecord[]).map((file) => ({
+        ...file,
+        lastSeenAt: new Date(file.lastSeenAt)
+      }));
+
   return {
     ...parsed,
     createdAt: new Date(parsed.createdAt),
-    lastActiveAt: new Date(parsed.lastActiveAt)
+    lastActiveAt: new Date(parsed.lastActiveAt),
+    recentFiles
   };
 }
 

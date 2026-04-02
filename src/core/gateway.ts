@@ -1,7 +1,8 @@
 import { copyFileSync, existsSync, lstatSync, mkdirSync, realpathSync } from 'node:fs';
 import { join, resolve, sep } from 'node:path';
 import { ChannelAdapter } from './adapter';
-import { AgentMessage, ChannelControlInput } from './types';
+import { createRecentFileRecord, writeRecentFilesMemory } from './recent-files';
+import { AgentMessage, Attachment, ChannelControlInput, RecentFileRecord, RecentFileSource, SessionProfile } from './types';
 import { SessionOrchestrator } from './orchestrator';
 import { CommandHandler } from '../commands';
 import { CommandContext } from '../commands/types';
@@ -10,7 +11,9 @@ import { sanitizeAttachmentName } from './attachments';
 interface GatewayOptions {
   adapters: ChannelAdapter[];
   commandHandler: CommandHandler;
-  orchestrator: SessionOrchestrator;
+  orchestrator: SessionOrchestrator & {
+    registerRecentFiles?: SessionOrchestrator['registerRecentFiles'];
+  };
   controlStore?: {
     findProjectionByThreadId: (channelType: string, threadId: string) => unknown;
   };
@@ -22,8 +25,8 @@ interface GatewayOptions {
     stop: () => void;
   };
   logger: {
-    info: (message: string, data?: unknown) => void;
-    error: (message: string, data?: unknown) => void;
+    info: (data: unknown, message: string) => void;
+    error: (data: unknown, message: string) => void;
   };
 }
 
@@ -85,6 +88,17 @@ export class AgentGateway {
     this.options.logger.info({ channelId: message.channelId, content: message.content.substring(0, 100) }, 'Message received');
     const session = this.options.orchestrator.getOrCreateSession(message.channelId, message.channelType);
     const normalizedMessage = this.normalizeMessageAttachments(message, session.workingDirectory);
+    const inboundRecentFiles = this.toRecentFiles(
+      session.workingDirectory,
+      normalizedMessage.attachments ?? [],
+      'discord_inbound',
+      message.timestamp
+    );
+
+    if (inboundRecentFiles.length > 0) {
+      const updatedSession = this.options.orchestrator.registerRecentFiles?.(session.id, inboundRecentFiles);
+      this.mirrorRecentFilesMemory(session.workingDirectory, updatedSession);
+    }
 
     if (normalizedMessage.content.startsWith('/')) {
       this.options.logger.info({ channelId: normalizedMessage.channelId, content: normalizedMessage.content }, 'Executing command');
@@ -103,7 +117,26 @@ export class AgentGateway {
 
     try {
       const response = await this.options.orchestrator.execute(session.id, normalizedMessage);
-      await adapter.send(normalizedMessage.channelId, response);
+      if (response.metadata?.recentFileCandidates?.length) {
+        const updatedSession = this.options.orchestrator.registerRecentFiles?.(session.id, response.metadata.recentFileCandidates);
+        this.mirrorRecentFilesMemory(session.workingDirectory, updatedSession);
+      }
+
+      const sendResult = await adapter.send(normalizedMessage.channelId, response);
+
+      if (sendResult.success && response.attachments?.length) {
+        const outboundRecentFiles = this.toRecentFiles(
+          session.workingDirectory,
+          response.attachments,
+          'claude_outbound',
+          new Date()
+        );
+
+        if (outboundRecentFiles.length > 0) {
+          const updatedSession = this.options.orchestrator.registerRecentFiles?.(session.id, outboundRecentFiles);
+          this.mirrorRecentFilesMemory(session.workingDirectory, updatedSession);
+        }
+      }
     } finally {
       stopTyping();
     }
@@ -234,5 +267,44 @@ export class AgentGateway {
     }
 
     return false;
+  }
+
+  private mirrorRecentFilesMemory(workingDirectory: string, session?: Pick<SessionProfile, 'recentFiles'>): void {
+    if (!session?.recentFiles) {
+      return;
+    }
+
+    try {
+      writeRecentFilesMemory(workingDirectory, session.recentFiles);
+    } catch (error) {
+      this.options.logger.error(
+        {
+          workingDirectory,
+          error: error instanceof Error ? error.message : String(error)
+        },
+        'Failed to mirror recent files memory'
+      );
+    }
+  }
+
+  private toRecentFiles(
+    workingDirectory: string,
+    attachments: Attachment[],
+    source: RecentFileSource,
+    seenAt: Date
+  ): RecentFileRecord[] {
+    return attachments
+      .filter((attachment) => attachment.localPath && existsSync(attachment.localPath) && this.isInsideDirectory(workingDirectory, attachment.localPath))
+      .map((attachment) =>
+        createRecentFileRecord({
+          id: `${source}:${attachment.id}`,
+          workingDirectory,
+          absolutePath: attachment.localPath!,
+          displayName: attachment.name,
+          source,
+          mediaType: attachment.type,
+          lastSeenAt: seenAt
+        })
+      );
   }
 }

@@ -1,0 +1,14 @@
+{
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "npx tsx \"$CLAUDE_PROJECT_DIR\"/skills/file-return/file-return-stop.ts"
+          }
+        ]
+      }
+    ]
+  }
+}

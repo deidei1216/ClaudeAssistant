@@ -80,6 +80,12 @@ describe('SessionOrchestrator', () => {
       expect(orchestrator.getSession(first.id)?.messageCount).toBe(1);
     });
 
+    it('initializes new sessions with an empty recent file list', () => {
+      const session = orchestrator.getOrCreateSession('channel-1', 'discord');
+
+      expect(session.recentFiles).toEqual([]);
+    });
+
     it('recreates the Claude session and retries when resuming hits a corrupt JSON session error', async () => {
       const first = orchestrator.getOrCreateSession('channel-1', 'discord');
       store.save({
@@ -326,6 +332,43 @@ describe('SessionOrchestrator', () => {
 
       const updated = orchestrator.getSession(session.id);
       expect(updated?.messageCount).toBe(2);
+    });
+  });
+
+  describe('registerRecentFiles', () => {
+    it('registers recent files and refreshes duplicates by absolute path', () => {
+      const session = orchestrator.getOrCreateSession('channel-1', 'discord');
+
+      const updated = orchestrator.registerRecentFiles(session.id, [
+        {
+          id: 'file-1',
+          displayName: 'report.html',
+          relativePath: 'outputs/report.html',
+          absolutePath: '/tmp/project/outputs/report.html',
+          source: 'workspace_detected',
+          mediaType: 'text/html',
+          lastSeenAt: new Date('2026-04-01T00:00:00.000Z'),
+          summary: 'generated html'
+        },
+        {
+          id: 'file-2',
+          displayName: 'report.html',
+          relativePath: 'outputs/report.html',
+          absolutePath: '/tmp/project/outputs/report.html',
+          source: 'claude_outbound',
+          mediaType: 'text/html',
+          lastSeenAt: new Date('2026-04-01T00:05:00.000Z'),
+          summary: 'last sent html'
+        }
+      ]);
+
+      expect(updated.recentFiles).toEqual([
+        expect.objectContaining({
+          source: 'claude_outbound',
+          summary: 'last sent html',
+          relativePath: 'outputs/report.html'
+        })
+      ]);
     });
   });
 

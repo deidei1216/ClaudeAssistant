@@ -219,6 +219,85 @@ describe('AgentGateway', () => {
     });
   });
 
+  it('registers normalized inbound attachments in session recent files and mirrors workspace memory', async () => {
+    const workingDirectory = mkdtempSync(join(tmpdir(), 'gateway-session-'));
+    tempDirectories.push(workingDirectory);
+    const sourcePath = join(workingDirectory, '.claude-gateway', 'inbox', 'channel-1', 'att-1-budget.xlsx');
+    mkdirSync(join(workingDirectory, '.claude-gateway', 'inbox', 'channel-1'), { recursive: true });
+    writeFileSync(sourcePath, 'budget bytes');
+    const recentFile = {
+      id: 'discord_inbound:att-1',
+      displayName: 'budget.xlsx',
+      relativePath: '.claude-gateway/inbox/channel-1/att-1-budget.xlsx',
+      absolutePath: sourcePath,
+      source: 'discord_inbound' as const,
+      mediaType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+      lastSeenAt: new Date('2026-03-30T00:00:00.000Z'),
+      summary: 'inbound excel'
+    };
+
+    const adapter: ChannelAdapter = {
+      type: 'discord',
+      name: 'Discord',
+      onMessage: vi.fn(),
+      send: vi.fn().mockResolvedValue({ messageId: '1', success: true }),
+      initialize: vi.fn(),
+      connect: vi.fn(),
+      disconnect: vi.fn()
+    };
+    const commandHandler = {
+      executeFromMessage: vi.fn()
+    };
+    const session = createSession({ workingDirectory, recentFiles: [] });
+    const updatedSession = createSession({ workingDirectory, recentFiles: [recentFile] });
+    const orchestrator = {
+      getOrCreateSession: vi.fn().mockReturnValue(session),
+      execute: vi.fn().mockResolvedValue({ content: 'Claude response', replyTo: 'msg-1' }),
+      registerRecentFiles: vi.fn().mockReturnValue(updatedSession)
+    };
+    const gateway = new AgentGateway({
+      adapters: [adapter],
+      commandHandler: commandHandler as unknown as CommandHandler,
+      orchestrator: orchestrator as never,
+      logger: { info: vi.fn(), error: vi.fn() }
+    });
+
+    await gateway.handleMessage(
+      adapter,
+      createMessage('edit this workbook', {
+        attachments: [
+          {
+            id: 'att-1',
+            name: 'budget.xlsx',
+            type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            size: 12,
+            url: 'https://cdn.discordapp.com/attachments/att-1',
+            localPath: sourcePath
+          }
+        ]
+      })
+    );
+
+    expect(orchestrator.registerRecentFiles).toHaveBeenCalledWith(
+      'session-1',
+      [
+        recentFile
+      ]
+    );
+
+    expect(
+      JSON.parse(readFileSync(join(workingDirectory, '.claude-gateway', 'memory', 'recent-files.json'), 'utf8'))
+    ).toEqual({
+      recentFiles: [
+        expect.objectContaining({
+          source: 'discord_inbound',
+          relativePath: '.claude-gateway/inbox/channel-1/att-1-budget.xlsx',
+          summary: 'inbound excel'
+        })
+      ]
+    });
+  });
+
   it('defensively copies symlinked attachment paths that escape the working directory', async () => {
     const outsideRoot = mkdtempSync(join(tmpdir(), 'gateway-outside-'));
     const workingDirectory = mkdtempSync(join(tmpdir(), 'gateway-session-'));
@@ -281,6 +360,341 @@ describe('AgentGateway', () => {
     );
     expect(forwardedAttachment?.localPath).not.toBe(symlinkPath);
     expect(readFileSync(forwardedAttachment?.localPath ?? '', 'utf8')).toBe('symlink attachment payload');
+  });
+
+  it('registers worker artifact candidates before sending the response and refreshes memory', async () => {
+    const workingDirectory = mkdtempSync(join(tmpdir(), 'gateway-worker-'));
+    tempDirectories.push(workingDirectory);
+    const adapter: ChannelAdapter = {
+      type: 'discord',
+      name: 'Discord',
+      onMessage: vi.fn(),
+      send: vi.fn().mockResolvedValue({ messageId: '1', success: true }),
+      initialize: vi.fn(),
+      connect: vi.fn(),
+      disconnect: vi.fn()
+    };
+    const commandHandler = {
+      executeFromMessage: vi.fn()
+    };
+    const session = createSession({ workingDirectory, recentFiles: [] });
+    const updatedSession = createSession({
+      workingDirectory,
+      recentFiles: [
+        {
+          id: 'workspace:outputs/report.html',
+          displayName: 'report.html',
+          relativePath: 'outputs/report.html',
+          absolutePath: join(workingDirectory, 'outputs/report.html'),
+          source: 'workspace_detected',
+          mediaType: 'text/html',
+          lastSeenAt: new Date('2026-04-01T00:00:00.000Z'),
+          summary: 'generated html'
+        }
+      ]
+    });
+    const orchestrator = {
+      getOrCreateSession: vi.fn().mockReturnValue(session),
+      execute: vi.fn().mockResolvedValue({
+        content: 'Saved report to outputs/report.html',
+        replyTo: 'msg-1',
+        metadata: {
+          recentFileCandidates: [
+            {
+              id: 'workspace:outputs/report.html',
+              displayName: 'report.html',
+              relativePath: 'outputs/report.html',
+              absolutePath: join(workingDirectory, 'outputs/report.html'),
+              source: 'workspace_detected',
+              mediaType: 'text/html',
+              lastSeenAt: new Date('2026-04-01T00:00:00.000Z'),
+              summary: 'generated html'
+            }
+          ]
+        }
+      }),
+      registerRecentFiles: vi.fn().mockReturnValue(updatedSession)
+    };
+    const gateway = new AgentGateway({
+      adapters: [adapter],
+      commandHandler: commandHandler as unknown as CommandHandler,
+      orchestrator: orchestrator as never,
+      logger: { info: vi.fn(), error: vi.fn() }
+    });
+
+    await gateway.handleMessage(adapter, createMessage('make an html report'));
+
+    expect(orchestrator.registerRecentFiles).toHaveBeenCalledWith(
+      'session-1',
+      [
+        expect.objectContaining({
+          source: 'workspace_detected',
+          relativePath: 'outputs/report.html'
+        })
+      ]
+    );
+
+    expect(
+      JSON.parse(readFileSync(join(workingDirectory, '.claude-gateway', 'memory', 'recent-files.json'), 'utf8'))
+    ).toEqual({
+      recentFiles: [
+        expect.objectContaining({
+          source: 'workspace_detected',
+          relativePath: 'outputs/report.html'
+        })
+      ]
+    });
+  });
+
+  it('refreshes recent file memory after a successful outbound send', async () => {
+    const workingDirectory = mkdtempSync(join(tmpdir(), 'gateway-outbound-'));
+    tempDirectories.push(workingDirectory);
+    mkdirSync(join(workingDirectory, 'exports'), { recursive: true });
+    const outboundPath = join(workingDirectory, 'exports', 'report.html');
+    writeFileSync(outboundPath, '<html>report</html>');
+
+    const adapter: ChannelAdapter = {
+      type: 'discord',
+      name: 'Discord',
+      onMessage: vi.fn(),
+      send: vi.fn().mockResolvedValue({ messageId: '1', success: true }),
+      initialize: vi.fn(),
+      connect: vi.fn(),
+      disconnect: vi.fn()
+    };
+    const commandHandler = {
+      executeFromMessage: vi.fn()
+    };
+    const session = createSession({ workingDirectory, recentFiles: [] });
+    const updatedSession = createSession({
+      workingDirectory,
+      recentFiles: [
+        {
+          id: 'claude_outbound:exports/report.html',
+          displayName: 'report.html',
+          relativePath: 'exports/report.html',
+          absolutePath: outboundPath,
+          source: 'claude_outbound',
+          mediaType: 'text/html',
+          lastSeenAt: new Date('2026-04-01T00:00:00.000Z'),
+          summary: 'last sent html'
+        }
+      ]
+    });
+    const orchestrator = {
+      getOrCreateSession: vi.fn().mockReturnValue(session),
+      execute: vi.fn().mockResolvedValue({
+        content: 'Here is the report.',
+        replyTo: 'msg-1',
+        attachments: [
+          {
+            id: 'outbound:exports/report.html',
+            name: 'report.html',
+            type: 'text/html',
+            size: 19,
+            url: outboundPath,
+            localPath: outboundPath
+          }
+        ]
+      }),
+      registerRecentFiles: vi.fn().mockReturnValue(updatedSession)
+    };
+    const gateway = new AgentGateway({
+      adapters: [adapter],
+      commandHandler: commandHandler as unknown as CommandHandler,
+      orchestrator: orchestrator as never,
+      logger: { info: vi.fn(), error: vi.fn() }
+    });
+
+    await gateway.handleMessage(adapter, createMessage('make an html report'));
+
+    expect(orchestrator.registerRecentFiles).toHaveBeenCalledWith(
+      'session-1',
+      [
+        expect.objectContaining({
+          source: 'claude_outbound',
+          relativePath: 'exports/report.html',
+          summary: 'last sent html'
+        })
+      ]
+    );
+
+    expect(
+      JSON.parse(readFileSync(join(workingDirectory, '.claude-gateway', 'memory', 'recent-files.json'), 'utf8'))
+    ).toEqual({
+      recentFiles: [
+        expect.objectContaining({
+          source: 'claude_outbound',
+          relativePath: 'exports/report.html',
+          summary: 'last sent html'
+        })
+      ]
+    });
+  });
+
+  it('uploads explicit bridge handoff attachments without owning the delivery policy', async () => {
+    const workingDirectory = mkdtempSync(join(tmpdir(), 'gateway-bridge-outbound-'));
+    tempDirectories.push(workingDirectory);
+    mkdirSync(join(workingDirectory, 'exports'), { recursive: true });
+    const outboundPath = join(workingDirectory, 'exports', 'site-bundle.zip');
+    writeFileSync(outboundPath, 'zip bytes');
+
+    const adapter: ChannelAdapter = {
+      type: 'discord',
+      name: 'Discord',
+      onMessage: vi.fn(),
+      send: vi.fn().mockResolvedValue({ messageId: '1', success: true }),
+      initialize: vi.fn(),
+      connect: vi.fn(),
+      disconnect: vi.fn()
+    };
+    const commandHandler = {
+      executeFromMessage: vi.fn()
+    };
+    const session = createSession({ workingDirectory, recentFiles: [] });
+    const updatedSession = createSession({
+      workingDirectory,
+      recentFiles: [
+        {
+          id: 'claude_outbound:exports/site-bundle.zip',
+          displayName: 'site-bundle.zip',
+          relativePath: 'exports/site-bundle.zip',
+          absolutePath: outboundPath,
+          source: 'claude_outbound',
+          mediaType: 'application/zip',
+          lastSeenAt: new Date('2026-04-02T00:00:00.000Z'),
+          summary: 'last sent file'
+        }
+      ]
+    });
+    const orchestrator = {
+      getOrCreateSession: vi.fn().mockReturnValue(session),
+      execute: vi.fn().mockResolvedValue({
+        content: '已处理完成。',
+        replyTo: 'msg-1',
+        attachments: [
+          {
+            id: 'outbound:exports/site-bundle.zip',
+            name: 'site-bundle.zip',
+            type: 'application/zip',
+            size: 9,
+            url: outboundPath,
+            localPath: outboundPath
+          }
+        ]
+      }),
+      registerRecentFiles: vi.fn().mockReturnValue(updatedSession)
+    };
+    const gateway = new AgentGateway({
+      adapters: [adapter],
+      commandHandler: commandHandler as unknown as CommandHandler,
+      orchestrator: orchestrator as never,
+      logger: { info: vi.fn(), error: vi.fn() }
+    });
+
+    await gateway.handleMessage(adapter, createMessage('发给我'));
+
+    expect(adapter.send).toHaveBeenCalledWith(
+      'channel-1',
+      expect.objectContaining({
+        attachments: [
+          expect.objectContaining({
+            name: 'site-bundle.zip',
+            localPath: outboundPath
+          })
+        ]
+      })
+    );
+  });
+
+  it('keeps handling messages when mirroring recent-files memory fails', async () => {
+    const recentFilesModule = await import('../../src/core/recent-files');
+    const writeRecentFilesMemorySpy = vi
+      .spyOn(recentFilesModule, 'writeRecentFilesMemory')
+      .mockImplementation(() => {
+        throw new Error('disk full');
+      });
+
+    const workingDirectory = mkdtempSync(join(tmpdir(), 'gateway-memory-failure-'));
+    tempDirectories.push(workingDirectory);
+    mkdirSync(join(workingDirectory, '.claude-gateway', 'inbox', 'channel-1'), { recursive: true });
+    const sourcePath = join(workingDirectory, '.claude-gateway', 'inbox', 'channel-1', 'att-1-budget.xlsx');
+    writeFileSync(sourcePath, 'budget bytes');
+
+    const adapter: ChannelAdapter = {
+      type: 'discord',
+      name: 'Discord',
+      onMessage: vi.fn(),
+      send: vi.fn().mockResolvedValue({ messageId: '1', success: true }),
+      initialize: vi.fn(),
+      connect: vi.fn(),
+      disconnect: vi.fn()
+    };
+    const commandHandler = {
+      executeFromMessage: vi.fn()
+    };
+    const session = createSession({ workingDirectory, recentFiles: [] });
+    const logger = {
+      info: vi.fn(),
+      error: vi.fn()
+    };
+    const updatedSession = createSession({
+      workingDirectory,
+      recentFiles: [
+        {
+          id: 'discord_inbound:att-1',
+          displayName: 'budget.xlsx',
+          relativePath: '.claude-gateway/inbox/channel-1/att-1-budget.xlsx',
+          absolutePath: sourcePath,
+          source: 'discord_inbound',
+          mediaType: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+          lastSeenAt: new Date('2026-04-01T00:00:00.000Z'),
+          summary: 'inbound excel'
+        }
+      ]
+    });
+    const orchestrator = {
+      getOrCreateSession: vi.fn().mockReturnValue(session),
+      execute: vi.fn().mockResolvedValue({ content: 'Claude response', replyTo: 'msg-1' }),
+      registerRecentFiles: vi.fn().mockReturnValue(updatedSession)
+    };
+    const gateway = new AgentGateway({
+      adapters: [adapter],
+      commandHandler: commandHandler as unknown as CommandHandler,
+      orchestrator: orchestrator as never,
+      logger
+    });
+
+    await gateway.handleMessage(
+      adapter,
+      createMessage('edit this workbook', {
+        attachments: [
+          {
+            id: 'att-1',
+            name: 'budget.xlsx',
+            type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+            size: 12,
+            url: 'https://cdn.discordapp.com/attachments/att-1',
+            localPath: sourcePath
+          }
+        ]
+      })
+    );
+
+    expect(orchestrator.execute).toHaveBeenCalled();
+    expect(adapter.send).toHaveBeenCalledWith('channel-1', {
+      content: 'Claude response',
+      replyTo: 'msg-1'
+    });
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.objectContaining({
+        workingDirectory,
+        error: 'disk full'
+      }),
+      'Failed to mirror recent files memory'
+    );
+
+    writeRecentFilesMemorySpy.mockRestore();
   });
 
   it('creates or retrieves session for each message', async () => {

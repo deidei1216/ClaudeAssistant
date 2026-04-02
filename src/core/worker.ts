@@ -1,8 +1,34 @@
-import { statSync } from 'node:fs';
-import { basename, relative, resolve, sep } from 'node:path';
+import { existsSync, readdirSync, statSync } from 'node:fs';
+import { basename, join, relative, resolve, sep } from 'node:path';
 import { spawn } from 'node:child_process';
 import { extractFileMarkers, resolveOutboundAttachment } from './attachments';
-import { AgentExecutor, AgentMessage, AgentResponse, SessionProfile } from './types';
+import { createRecentFileRecord } from './recent-files';
+import { AgentExecutor, AgentMessage, AgentResponse, RecentFileRecord, SessionProfile } from './types';
+
+const TRACKED_OUTPUT_EXTENSIONS = new Set([
+  '.csv',
+  '.doc',
+  '.docx',
+  '.gif',
+  '.htm',
+  '.html',
+  '.json',
+  '.jpeg',
+  '.jpg',
+  '.md',
+  '.pdf',
+  '.png',
+  '.ppt',
+  '.pptx',
+  '.txt',
+  '.webp',
+  '.xlsx',
+  '.yaml',
+  '.yml'
+]);
+const OUTPUT_PATH_PATTERN = /(?:^|[\s(])([A-Za-z0-9._/-]+\.(?:csv|doc|docx|gif|htm|html|json|jpeg|jpg|md|pdf|png|ppt|pptx|txt|webp|xlsx|yaml|yml))(?:$|[\s).,:])/gm;
+
+type WorkspaceSnapshot = Map<string, number>;
 
 interface ClaudePrintResult {
   type?: string;
@@ -67,6 +93,7 @@ export class ClaudeCodeWorker implements AgentExecutor {
   constructor(private readonly runner: CommandRunner = defaultRunner) {}
 
   async execute(session: SessionProfile, message: AgentMessage): Promise<AgentResponse> {
+    const snapshotBeforeRun = this.snapshotWorkspaceOutputs(session.workingDirectory);
     const args = this.buildArgs(session, message, session.messageCount > 0 ? '--resume' : '--session-id');
 
     let result = await this.runner('claude', args, { cwd: session.workingDirectory });
@@ -74,10 +101,10 @@ export class ClaudeCodeWorker implements AgentExecutor {
     if (this.shouldRetryWithResume(args, result)) {
       const resumeArgs = this.buildArgs(session, message, '--resume');
       result = await this.runner('claude', resumeArgs, { cwd: session.workingDirectory });
-      return this.toAgentResponse(result, resumeArgs, session.workingDirectory, message.id);
+      return this.toAgentResponse(result, resumeArgs, session.workingDirectory, message.id, snapshotBeforeRun);
     }
 
-    return this.toAgentResponse(result, args, session.workingDirectory, message.id);
+    return this.toAgentResponse(result, args, session.workingDirectory, message.id, snapshotBeforeRun);
   }
 
   private buildArgs(session: SessionProfile, message: AgentMessage, sessionFlag: '--resume' | '--session-id'): string[] {
@@ -105,27 +132,22 @@ export class ClaudeCodeWorker implements AgentExecutor {
   }
 
   private buildPrompt(session: SessionProfile, message: AgentMessage): string {
-    if (!message.attachments?.length) {
-      return message.content;
+    const sections = [message.content];
+
+    if (message.attachments?.length) {
+      const manifest = message.attachments
+        .map((attachment) => {
+          const location = attachment.localPath && this.isInsideWorkingDirectory(session.workingDirectory, attachment.localPath)
+            ? relative(session.workingDirectory, attachment.localPath)
+            : attachment.url;
+          return `- name: ${attachment.name} | type: ${attachment.type} | size: ${attachment.size} bytes | location: ${location}`;
+        })
+        .join('\n');
+
+      sections.push('', 'Attached files:', manifest);
     }
 
-    const manifest = message.attachments
-      .map((attachment) => {
-        const location = attachment.localPath && this.isInsideWorkingDirectory(session.workingDirectory, attachment.localPath)
-          ? relative(session.workingDirectory, attachment.localPath)
-          : attachment.url;
-        return `- name: ${attachment.name} | type: ${attachment.type} | size: ${attachment.size} bytes | location: ${location}`;
-      })
-      .join('\n');
-
-    return [
-      message.content,
-      '',
-      'Attached files:',
-      manifest,
-      '',
-      'If you want Discord to receive a local file, include [[file:relative/path/from-working-directory]] on its own line in your final answer.'
-    ].join('\n');
+    return sections.join('\n');
   }
 
   private isInsideWorkingDirectory(workingDirectory: string, candidatePath: string): boolean {
@@ -145,12 +167,13 @@ export class ClaudeCodeWorker implements AgentExecutor {
     return args.includes('--session-id') && result.exitCode !== 0 && result.stderr.toLowerCase().includes('already in use');
   }
 
-  private toAgentResponse(
+  private async toAgentResponse(
     result: { stdout: string; stderr: string; exitCode: number },
     args: string[],
     cwd: string,
-    replyTo: string
-  ): AgentResponse {
+    replyTo: string,
+    snapshotBeforeRun: WorkspaceSnapshot
+  ): Promise<AgentResponse> {
     if (result.exitCode !== 0) {
       throw new ClaudeExecutionError(result.stderr || `claude exited with status ${result.exitCode}`, {
         args,
@@ -162,13 +185,66 @@ export class ClaudeCodeWorker implements AgentExecutor {
     }
 
     const parsed = this.parseClaudeOutput(result.stdout, args, cwd);
-    const { content, attachments } = this.parseOutboundAttachments(parsed.result?.trim() ?? '', cwd);
+    const { content, attachments = [] } = this.parseOutboundAttachments(parsed.result?.trim() ?? '', cwd);
+
+    const recentFileCandidates = this.detectWorkspaceArtifacts(cwd, content, snapshotBeforeRun);
 
     return {
       content,
       attachments: attachments.length > 0 ? attachments : undefined,
-      replyTo
+      replyTo,
+      metadata: recentFileCandidates.length > 0 ? { recentFileCandidates } : undefined
     };
+  }
+
+  private snapshotWorkspaceOutputs(workingDirectory: string, currentDirectory = workingDirectory, entries: WorkspaceSnapshot = new Map()): WorkspaceSnapshot {
+    if (!existsSync(currentDirectory)) {
+      return entries;
+    }
+
+    for (const entry of readdirSync(currentDirectory, { withFileTypes: true })) {
+      if (entry.name === '.git' || entry.name === 'node_modules') {
+        continue;
+      }
+
+      const absolutePath = join(currentDirectory, entry.name);
+      if (entry.isDirectory()) {
+        this.snapshotWorkspaceOutputs(workingDirectory, absolutePath, entries);
+        continue;
+      }
+
+      const fileExtension = absolutePath.slice(absolutePath.lastIndexOf('.')).toLowerCase();
+      if (!TRACKED_OUTPUT_EXTENSIONS.has(fileExtension)) {
+        continue;
+      }
+
+      entries.set(relative(workingDirectory, absolutePath).replace(/\\/g, '/'), statSync(absolutePath).mtimeMs);
+    }
+
+    return entries;
+  }
+
+  private detectWorkspaceArtifacts(
+    workingDirectory: string,
+    content: string,
+    snapshotBeforeRun: WorkspaceSnapshot
+  ): RecentFileRecord[] {
+    const snapshotAfterRun = this.snapshotWorkspaceOutputs(workingDirectory);
+    const referencedPaths = new Set(Array.from(content.matchAll(OUTPUT_PATH_PATTERN), (match) => match[1]));
+
+    return Array.from(snapshotAfterRun.entries())
+      .filter(([relativePath, mtimeMs]) => referencedPaths.has(relativePath) && (snapshotBeforeRun.get(relativePath) ?? -1) !== mtimeMs)
+      .map(([relativePath]) =>
+        createRecentFileRecord({
+          id: `workspace:${relativePath}`,
+          workingDirectory,
+          absolutePath: join(workingDirectory, relativePath),
+          displayName: basename(relativePath),
+          source: 'workspace_detected',
+          mediaType: 'application/octet-stream',
+          lastSeenAt: new Date()
+        })
+      );
   }
 
   private parseOutboundAttachments(content: string, workingDirectory: string): Pick<AgentResponse, 'content' | 'attachments'> {

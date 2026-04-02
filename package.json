@@ -12,6 +12,7 @@
     "start": "node dist/index.js",
     "test": "vitest run",
     "test:watch": "vitest watch",
+    "test:e2e:file-return": "tsx scripts/e2e/file-return-stop-hook.ts",
     "control:upsert-run": "tsx scripts/control/upsert-run.ts",
     "control:request": "tsx scripts/control/request-control.ts",
     "control:poll": "tsx scripts/control/poll-resolved-request.ts"
