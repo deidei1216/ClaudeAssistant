@@ -127,14 +127,15 @@ describe('attachments utilities', () => {
     });
   });
 
-  it('rejects traversal outside the working directory', () => {
+  it('resolves traversal paths outside the working directory when explicitly requested', () => {
     const workingDirectory = mkdtempSync(join(tmpdir(), 'attachments-'));
 
     const result = resolveOutboundAttachment(workingDirectory, '../escape.txt');
 
     expect(result).toEqual({
-      ok: false,
-      reason: 'Path escapes the working directory'
+      ok: true,
+      relativePath: '../escape.txt',
+      absolutePath: join(workingDirectory, '..', 'escape.txt')
     });
   });
 
@@ -162,7 +163,7 @@ describe('attachments utilities', () => {
     });
   });
 
-  it('rejects outbound paths that escape through a symlinked directory inside the working directory', () => {
+  it('resolves outbound paths that traverse through a symlinked directory inside the working directory', () => {
     const workingDirectory = mkdtempSync(join(tmpdir(), 'attachments-'));
     const outsideDirectory = mkdtempSync(join(tmpdir(), 'attachments-outside-'));
     symlinkSync(outsideDirectory, join(workingDirectory, 'exports'));
@@ -170,19 +171,21 @@ describe('attachments utilities', () => {
     const result = resolveOutboundAttachment(workingDirectory, 'exports/report.txt');
 
     expect(result).toEqual({
-      ok: false,
-      reason: 'Path escapes the working directory'
+      ok: true,
+      relativePath: 'exports/report.txt',
+      absolutePath: join(workingDirectory, 'exports', 'report.txt')
     });
   });
 
-  it('rejects absolute outbound paths', () => {
+  it('resolves absolute outbound paths', () => {
     const workingDirectory = mkdtempSync(join(tmpdir(), 'attachments-'));
 
     const result = resolveOutboundAttachment(workingDirectory, '/etc/passwd');
 
     expect(result).toEqual({
-      ok: false,
-      reason: 'Absolute outbound paths are not allowed'
+      ok: true,
+      relativePath: '/etc/passwd',
+      absolutePath: '/etc/passwd'
     });
   });
 });

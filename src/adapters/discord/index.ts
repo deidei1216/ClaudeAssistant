@@ -116,7 +116,7 @@ export class DiscordAdapter implements ChannelAdapter {
         channelId: reaction.message.channelId,
         threadId: reaction.message.channel.isThread?.() ? reaction.message.channelId : undefined,
         userId: user.id,
-        username: user.username,
+        username: user.username ?? undefined,
         createdAt: new Date()
       });
 

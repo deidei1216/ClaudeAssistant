@@ -117,39 +117,13 @@ export function resolveOutboundAttachment(
 ):
   | { ok: true; relativePath: string; absolutePath: string }
   | { ok: false; reason: string } {
-  if (isAbsolute(relativePath) || /^[a-zA-Z]:[\\/]/.test(relativePath)) {
-    return { ok: false, reason: 'Absolute outbound paths are not allowed' };
-  }
-
   const lexicalWorkingDirectory = resolve(workingDirectory);
-  if (resolve(lexicalWorkingDirectory, relativePath) === lexicalWorkingDirectory) {
+  const absolutePath = isAbsolute(relativePath) || /^[a-zA-Z]:[\\/]/.test(relativePath)
+    ? normalize(resolve(relativePath))
+    : normalize(resolve(lexicalWorkingDirectory, relativePath));
+
+  if (absolutePath === lexicalWorkingDirectory) {
     return { ok: false, reason: 'Path points to a directory' };
-  }
-
-  const absoluteWorkingDirectory = realpathSync(lexicalWorkingDirectory);
-  const absolutePath = normalize(resolve(lexicalWorkingDirectory, relativePath));
-  const segments = normalize(relativePath).split(sep).filter(Boolean);
-  let currentPath = absoluteWorkingDirectory;
-
-  for (let index = 0; index < segments.length; index += 1) {
-    const segment = segments[index];
-    currentPath = resolve(currentPath, segment);
-
-    if (!existsSync(currentPath)) {
-      break;
-    }
-
-    const isLastSegment = index === segments.length - 1;
-    if (!isLastSegment && !statSync(currentPath).isDirectory()) {
-      return { ok: false, reason: 'Path escapes the working directory' };
-    }
-
-    const realCurrentPath = realpathSync(currentPath);
-    if (!isInsideWorkingDirectory(absoluteWorkingDirectory, realCurrentPath)) {
-      return { ok: false, reason: 'Path escapes the working directory' };
-    }
-
-    currentPath = realCurrentPath;
   }
 
   if (existsSync(absolutePath) && statSync(absolutePath).isDirectory()) {

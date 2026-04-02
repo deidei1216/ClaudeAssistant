@@ -1,46 +1,9 @@
-import { existsSync, readFileSync } from 'node:fs';
-import { join } from 'node:path';
-import { extractFileMarkers } from '../core/attachments';
-import { packageArtifacts, resolveArtifacts } from '../core/file-return';
-
-interface RecentFileMemoryRecord {
-  relativePath: string;
-  displayName: string;
-  summary: string;
-  source?: string;
-}
-
-export interface FileReturnStopHookInput {
-  session_id?: string;
-  transcript_path?: string;
-  cwd: string;
-  permission_mode?: string;
-  hook_event_name: 'Stop';
-  stop_hook_active: boolean;
-  last_assistant_message: string;
-}
-
-export interface FileReturnStopHookResult {
-  decision?: 'block';
-  reason?: string;
-}
-
-function loadRecentFileCandidates(workingDirectory: string): RecentFileMemoryRecord[] {
-  const recentFilesPath = join(workingDirectory, '.claude-gateway', 'memory', 'recent-files.json');
-  if (!existsSync(recentFilesPath)) {
-    return [];
-  }
-
-  try {
-    const parsed = JSON.parse(readFileSync(recentFilesPath, 'utf8')) as {
-      recentFiles?: RecentFileMemoryRecord[];
-    };
-
-    return (parsed.recentFiles ?? []).filter((file) => file.source !== 'discord_inbound');
-  } catch {
-    return [];
-  }
-}
+import { extractFileMarkers } from '../../src/core/attachments';
+import { FileReturnStopHookInput, FileReturnStopHookResult } from './lib/contracts';
+import { discoverTranscriptArtifact } from './lib/discover-transcript-artifact';
+import { loadRecentFileCandidates } from './lib/gateway-contract';
+import { packageArtifacts } from './lib/package-artifacts';
+import { resolveArtifacts } from './lib/resolve-artifacts';
 
 export async function runFileReturnStopHook(
   input: FileReturnStopHookInput
@@ -81,6 +44,10 @@ export async function runFileReturnStopHook(
   }
 
   if (!handoffPath) {
+    handoffPath = discoverTranscriptArtifact(input.cwd, input.transcript_path) ?? undefined;
+  }
+
+  if (!handoffPath) {
     return {};
   }
 
@@ -101,7 +68,7 @@ async function main(): Promise<void> {
     process.stdin.on('error', reject);
   });
 
-  const parsed = JSON.parse(rawInput) as FileReturnStopHookInput;
+  const parsed = JSON.parse(rawInput) as Parameters<typeof runFileReturnStopHook>[0];
   const result = await runFileReturnStopHook(parsed);
   process.stdout.write(JSON.stringify(result));
 }

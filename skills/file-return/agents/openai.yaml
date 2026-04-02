@@ -1,0 +1,3 @@
+display_name: File Return
+short_description: Lightweight sharing metadata for the file-return skill contract.
+default_prompt: Use the file-return skill contract to decide whether generated artifacts should be returned directly, packaged together, or skipped.

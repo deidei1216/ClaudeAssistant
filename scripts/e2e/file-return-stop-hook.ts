@@ -17,6 +17,10 @@ export interface FileReturnE2EFixture {
   expectedMarker: string;
 }
 
+export function getFileReturnStopHookPath(): string {
+  return join(process.cwd(), 'skills', 'file-return', 'file-return-stop.ts');
+}
+
 export function createFileReturnE2EFixture(rootDirectory: string): FileReturnE2EFixture {
   const workingDirectory = resolve(rootDirectory);
   const outboxDirectory = join(workingDirectory, '.claude-gateway', 'outbox');
@@ -55,7 +59,7 @@ function runClaudePrint(
   workingDirectory: string,
   prompt: string
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  const hookScriptPath = join(process.cwd(), 'src', 'hooks', 'file-return-stop.ts');
+  const hookScriptPath = getFileReturnStopHookPath();
   const settings = JSON.stringify({
     hooks: {
       Stop: [

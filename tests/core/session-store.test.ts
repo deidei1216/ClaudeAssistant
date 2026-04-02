@@ -165,4 +165,37 @@ describe('SessionStore', () => {
     expect(retrievedDiscord?.workingDirectory).toBe('/discord/work');
     expect(retrievedSlack?.workingDirectory).toBe('/slack/work');
   });
+
+  it('persists recent files with date fields', () => {
+    const baseDir = mkdtempSync(join(tmpdir(), 'session-store-'));
+    const store = new SessionStore(baseDir);
+    const session: SessionProfile = {
+      id: 'session-with-files',
+      channelId: 'channel-files',
+      channelType: 'discord',
+      model: 'sonnet',
+      workingDirectory: '/tmp/project',
+      permissionMode: 'auto',
+      createdAt: new Date('2026-04-01T00:00:00.000Z'),
+      lastActiveAt: new Date('2026-04-01T00:00:00.000Z'),
+      status: 'active',
+      messageCount: 1,
+      recentFiles: [
+        {
+          id: 'file-1',
+          displayName: 'report.html',
+          relativePath: 'outputs/report.html',
+          absolutePath: '/tmp/project/outputs/report.html',
+          source: 'workspace_detected',
+          mediaType: 'text/html',
+          lastSeenAt: new Date('2026-04-01T00:01:00.000Z'),
+          summary: 'generated html'
+        }
+      ]
+    };
+
+    store.save(session);
+
+    expect(store.loadByChannel('discord', 'channel-files')).toEqual(session);
+  });
 });

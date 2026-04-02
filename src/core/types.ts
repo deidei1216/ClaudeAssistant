@@ -16,6 +16,19 @@ export interface Attachment {
   localPath?: string;
 }
 
+export type RecentFileSource = 'discord_inbound' | 'claude_outbound' | 'workspace_detected';
+
+export interface RecentFileRecord {
+  id: string;
+  displayName: string;
+  relativePath: string;
+  absolutePath: string;
+  source: RecentFileSource;
+  mediaType: string;
+  lastSeenAt: Date;
+  summary: string;
+}
+
 export interface AgentMessage {
   id: string;
   channelId: string;
@@ -32,7 +45,10 @@ export interface AgentResponse {
   content: string;
   attachments?: Attachment[];
   replyTo?: string;
-  metadata?: Record<string, unknown>;
+  metadata?: {
+    recentFileCandidates?: RecentFileRecord[];
+    [key: string]: unknown;
+  };
 }
 
 export interface SessionProfile {
@@ -52,6 +68,7 @@ export interface SessionProfile {
   status: SessionStatus;
   messageCount: number;
   totalTokens?: number;
+  recentFiles?: RecentFileRecord[];
 }
 
 export interface SessionProfileTemplate {

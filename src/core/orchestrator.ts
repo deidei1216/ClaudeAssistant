@@ -3,12 +3,14 @@ import {
   AgentExecutor,
   AgentMessage,
   AgentResponse,
+  RecentFileRecord,
   SessionConfigPatch,
   SessionFilter,
   SessionProfile,
   SessionProfileTemplate
 } from './types';
 import { ProfileManager } from './profile-manager';
+import { mergeRecentFiles } from './recent-files';
 import { SessionStore } from './session-store';
 
 interface OrchestratorOptions {
@@ -43,7 +45,8 @@ export class SessionOrchestrator {
       createdAt: now,
       lastActiveAt: now,
       status: 'active',
-      messageCount: 0
+      messageCount: 0,
+      recentFiles: []
     };
 
     this.options.sessionStore.save(session);
@@ -87,6 +90,18 @@ export class SessionOrchestrator {
 
   archiveSession(sessionId: string): void {
     this.updateSessionConfig(sessionId, { status: 'archived' });
+  }
+
+  registerRecentFiles(sessionId: string, files: RecentFileRecord[]): SessionProfile {
+    const session = this.requireSession(sessionId);
+    const updated: SessionProfile = {
+      ...session,
+      recentFiles: mergeRecentFiles(session.recentFiles ?? [], files),
+      lastActiveAt: this.clock()
+    };
+
+    this.options.sessionStore.save(updated);
+    return updated;
   }
 
   loadProfile(profileName: string): SessionProfileTemplate {

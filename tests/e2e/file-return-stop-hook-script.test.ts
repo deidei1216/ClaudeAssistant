@@ -4,10 +4,17 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import {
   assertFileReturnE2EResult,
-  createFileReturnE2EFixture
+  createFileReturnE2EFixture,
+  getFileReturnStopHookPath
 } from '../../scripts/e2e/file-return-stop-hook';
 
 describe('file-return stop hook e2e script helpers', () => {
+  it('resolves the skill-owned stop hook entrypoint', () => {
+    expect(getFileReturnStopHookPath()).toBe(
+      join(process.cwd(), 'skills', 'file-return', 'file-return-stop.ts')
+    );
+  });
+
   it('creates a fixture workspace with recent-files memory and an expected marker', () => {
     const rootDirectory = mkdtempSync(join(tmpdir(), 'file-return-e2e-script-'));
     const fixture = createFileReturnE2EFixture(rootDirectory);
