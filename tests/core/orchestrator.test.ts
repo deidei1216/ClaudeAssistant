@@ -1,11 +1,12 @@
 import { describe, expect, it, vi, beforeEach, afterEach } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, lstatSync, mkdtempSync, readFileSync, readlinkSync, rmSync, writeFileSync, mkdirSync, utimesSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { SessionOrchestrator } from '../../src/core/orchestrator';
-import { AgentExecutor, AgentMessage } from '../../src/core/types';
-import { ProfileManager } from '../../src/core/profile-manager';
-import { SessionStore } from '../../src/core/session-store';
+import { SessionOrchestrator } from '../../core/orchestrator';
+import { AgentExecutor, AgentMessage } from '../../core/types';
+import { ProfileManager } from '../../core/profile-manager';
+import { SessionStore } from '../../core/session-store';
+import { createInitialDeliveryManifest } from '../../core/delivery-paths';
 
 describe('SessionOrchestrator', () => {
   let tempDir: string;
@@ -49,6 +50,7 @@ describe('SessionOrchestrator', () => {
       defaults: {
         model: 'sonnet',
         permissionMode: 'auto',
+        settingsPath: '.claude/settings.json',
         workingDirectory: '.'
       },
       clock
@@ -74,7 +76,27 @@ describe('SessionOrchestrator', () => {
 
       const response = await orchestrator.execute(first.id, message);
 
+      expect(first.id).toBeTypeOf('string');
       expect(second.id).toBe(first.id);
+      expect(first.workingDirectory).toContain(join(first.id, 'workspace'));
+      expect(existsSync(join(storeDir, first.id, 'workspace', '.deliveries'))).toBe(true);
+      expect(lstatSync(join(storeDir, first.id, 'workspace', 'uploads')).isSymbolicLink()).toBe(true);
+      expect(readlinkSync(join(storeDir, first.id, 'workspace', 'uploads'))).toBe('../uploads');
+      const manifestPath = join(storeDir, first.id, 'workspace', '.deliveries', 'manifest.json');
+      expect(readFileSync(manifestPath, 'utf8')).toBe(JSON.stringify(createInitialDeliveryManifest(), null, 2));
+      const claudeMd = readFileSync(join(storeDir, first.id, 'CLAUDE.md'), 'utf8');
+      expect(claudeMd).toContain('uploads/ is a read-only source directory for user-provided files.');
+      expect(claudeMd).toContain('workspace/ is your free-form work area.');
+      expect(claudeMd).toContain('Every Bash command starts in workspace/.');
+      expect(claudeMd).toContain('User-uploaded source files are available from workspace as uploads/... .');
+      expect(claudeMd).toContain('Do not assume that cd from one Bash command persists into the next command.');
+      expect(claudeMd).toContain('Only content published into workspace/.deliveries/ is allowed to be returned to the user.');
+      expect(claudeMd).toContain('Do not write files into workspace/.deliveries/ manually.');
+      expect(claudeMd).toContain('publish-file.ts" <source> [displayName]');
+      expect(claudeMd).toContain('publish-dir.ts" <sourceDir> [name]');
+      expect(claudeMd).toContain('package-delivery.ts" <sourcePath> [outputName]');
+      expect(claudeMd).toContain('If a published primary delivery is a directory, the Stop hook may package it into an archive before asking for the final [[file:...]] marker.');
+      expect(claudeMd).toContain('Do not return files directly from uploads/, the session root, or arbitrary workspace paths.');
       expect(response.content).toBe('hello from claude');
       expect(executor.execute).toHaveBeenCalledTimes(1);
       expect(orchestrator.getSession(first.id)?.messageCount).toBe(1);
@@ -84,6 +106,99 @@ describe('SessionOrchestrator', () => {
       const session = orchestrator.getOrCreateSession('channel-1', 'discord');
 
       expect(session.recentFiles).toEqual([]);
+    });
+
+    it('initializes new sessions with the default Claude settings path', () => {
+      const session = orchestrator.getOrCreateSession('channel-1', 'discord');
+
+      expect(session.settingsPath).toBe('.claude/settings.json');
+    });
+
+    it('backfills the default Claude settings path onto existing active sessions', () => {
+      const existing = orchestrator.getOrCreateSession('channel-1', 'discord');
+      store.save({
+        ...existing,
+        settingsPath: undefined
+      });
+
+      const reloaded = orchestrator.getOrCreateSession('channel-1', 'discord');
+
+      expect(reloaded.id).toBe(existing.id);
+      expect(reloaded.settingsPath).toBe('.claude/settings.json');
+      expect(orchestrator.getSession(existing.id)?.settingsPath).toBe('.claude/settings.json');
+    });
+
+    it('refreshes existing active sessions onto the latest default Claude settings path', () => {
+      const existing = orchestrator.getOrCreateSession('channel-1', 'discord');
+      store.save({
+        ...existing,
+        settingsPath: '.claude/settings.json'
+      });
+      orchestrator = new SessionOrchestrator({
+        sessionStore: store,
+        profileManager: profiles,
+        executor,
+        defaults: {
+          model: 'sonnet',
+          permissionMode: 'auto',
+          settingsPath: '.claude/runtime-settings.json'
+        },
+        clock
+      });
+
+      const reloaded = orchestrator.getOrCreateSession('channel-1', 'discord');
+
+      expect(reloaded.id).toBe(existing.id);
+      expect(reloaded.settingsPath).toBe('.claude/runtime-settings.json');
+      expect(orchestrator.getSession(existing.id)?.settingsPath).toBe('.claude/runtime-settings.json');
+    });
+
+    it('keeps reusing the same channel session even when the runtime settings file is newer', () => {
+      const runtimeDirectory = join(tempDir, 'sessions', '.runtime');
+      mkdirSync(runtimeDirectory, { recursive: true });
+      const runtimeSettingsPath = join(runtimeDirectory, 'claude-settings.json');
+      writeFileSync(runtimeSettingsPath, '{"hooks":{}}');
+      utimesSync(runtimeSettingsPath, clock(), new Date('2026-03-30T00:00:05.000Z'));
+
+      orchestrator = new SessionOrchestrator({
+        sessionStore: store,
+        profileManager: profiles,
+        executor,
+        defaults: {
+          model: 'sonnet',
+          permissionMode: 'auto',
+          settingsPath: runtimeSettingsPath
+        },
+        clock
+      });
+
+      const existing = orchestrator.getOrCreateSession('channel-1', 'discord');
+      store.save({
+        ...existing,
+        settingsPath: runtimeSettingsPath,
+        createdAt: new Date('2026-03-30T00:00:00.000Z'),
+        lastActiveAt: new Date('2026-03-30T00:00:00.000Z')
+      });
+
+      const reloaded = orchestrator.getOrCreateSession('channel-1', 'discord');
+
+      expect(reloaded.id).toBe(existing.id);
+      expect(orchestrator.getSession(existing.id)?.status).toBe('active');
+      expect(reloaded.settingsPath).toBe(runtimeSettingsPath);
+    });
+
+    it('refreshes an existing session CLAUDE.md when the scaffold contract drifts', () => {
+      const session = orchestrator.getOrCreateSession('channel-1', 'discord');
+      const claudeMdPath = join(storeDir, session.id, 'CLAUDE.md');
+      writeFileSync(claudeMdPath, '# stale session contract\n');
+
+      const reloaded = orchestrator.getOrCreateSession('channel-1', 'discord');
+      const refreshedClaudeMd = readFileSync(claudeMdPath, 'utf8');
+
+      expect(reloaded.id).toBe(session.id);
+      expect(refreshedClaudeMd).toContain('uploads/ is a read-only source directory for user-provided files.');
+      expect(refreshedClaudeMd).toContain('publish-file.ts" <source> [displayName]');
+      expect(refreshedClaudeMd).not.toBe('# stale session contract\n');
     });
 
     it('recreates the Claude session and retries when resuming hits a corrupt JSON session error', async () => {
@@ -109,14 +224,35 @@ describe('SessionOrchestrator', () => {
 
       const response = await orchestrator.execute(first.id, message);
       const replacement = orchestrator.getSessionByChannel('channel-1', 'discord');
+      const replacementSessionId = vi.mocked(executor.execute).mock.calls[1][0].id;
 
       expect(response.content).toBe('recovered response');
       expect(executor.execute).toHaveBeenCalledTimes(2);
       expect(vi.mocked(executor.execute).mock.calls[0][0].id).toBe(first.id);
       expect(vi.mocked(executor.execute).mock.calls[1][0].id).not.toBe(first.id);
       expect(vi.mocked(executor.execute).mock.calls[1][0].messageCount).toBe(0);
-      expect(replacement?.id).toBe(vi.mocked(executor.execute).mock.calls[1][0].id);
+      expect(replacement).not.toBeNull();
+      expect(replacement?.status).toBe('active');
+      expect(replacement?.id).toBe(replacementSessionId);
       expect(replacement?.messageCount).toBe(1);
+      expect(replacement?.workingDirectory).toContain(join(replacementSessionId, 'workspace'));
+      expect(replacement?.workingDirectory).not.toBe(first.workingDirectory);
+      const replacementClaudePath = join(storeDir, replacementSessionId, 'CLAUDE.md');
+      expect(existsSync(replacementClaudePath)).toBe(true);
+      expect(existsSync(join(storeDir, replacementSessionId, 'workspace', '.deliveries'))).toBe(true);
+      expect(
+        readFileSync(join(storeDir, replacementSessionId, 'workspace', '.deliveries', 'manifest.json'), 'utf8')
+      ).toBe(JSON.stringify(createInitialDeliveryManifest(), null, 2));
+      const replacementClaudeMd = readFileSync(replacementClaudePath, 'utf8');
+      expect(replacementClaudeMd).toContain('uploads/ is a read-only source directory for user-provided files.');
+      expect(replacementClaudeMd).toContain('workspace/ is your free-form work area.');
+      expect(replacementClaudeMd).toContain('Only content published into workspace/.deliveries/ is allowed to be returned to the user.');
+      expect(replacementClaudeMd).toContain('Do not write files into workspace/.deliveries/ manually.');
+      expect(replacementClaudeMd).toContain('publish-file.ts" <source> [displayName]');
+      expect(replacementClaudeMd).toContain('publish-dir.ts" <sourceDir> [name]');
+      expect(replacementClaudeMd).toContain('package-delivery.ts" <sourcePath> [outputName]');
+      expect(replacementClaudeMd).toContain('If a published primary delivery is a directory, the Stop hook may package it into an archive before asking for the final [[file:...]] marker.');
+      expect(replacementClaudeMd).toContain('Do not return files directly from uploads/, the session root, or arbitrary workspace paths.');
     });
   });
 
@@ -268,13 +404,10 @@ describe('SessionOrchestrator', () => {
       const session = orchestrator.getOrCreateSession('channel-1', 'discord');
       const updated = orchestrator.updateSessionConfig(session.id, {
         model: 'opus',
-        // @ts-expect-error - intentionally trying to set immutable field
         id: 'hacked-id',
-        // @ts-expect-error - intentionally trying to set immutable field
         channelId: 'hacked-channel',
-        // @ts-expect-error - intentionally trying to set immutable field
         channelType: 'hacked-type'
-      });
+      } as any);
 
       expect(updated.id).toBe(session.id);
       expect(updated.channelId).toBe('channel-1');
@@ -343,18 +476,18 @@ describe('SessionOrchestrator', () => {
         {
           id: 'file-1',
           displayName: 'report.html',
-          relativePath: 'outputs/report.html',
-          absolutePath: '/tmp/project/outputs/report.html',
-          source: 'workspace_detected',
+          relativePath: '.deliveries/report.html',
+          absolutePath: '/tmp/project/workspace/.deliveries/report.html',
+          source: 'claude_outbound',
           mediaType: 'text/html',
           lastSeenAt: new Date('2026-04-01T00:00:00.000Z'),
-          summary: 'generated html'
+          summary: 'last sent html'
         },
         {
           id: 'file-2',
           displayName: 'report.html',
-          relativePath: 'outputs/report.html',
-          absolutePath: '/tmp/project/outputs/report.html',
+          relativePath: '.deliveries/report.html',
+          absolutePath: '/tmp/project/workspace/.deliveries/report.html',
           source: 'claude_outbound',
           mediaType: 'text/html',
           lastSeenAt: new Date('2026-04-01T00:05:00.000Z'),
@@ -366,7 +499,7 @@ describe('SessionOrchestrator', () => {
         expect.objectContaining({
           source: 'claude_outbound',
           summary: 'last sent html',
-          relativePath: 'outputs/report.html'
+          relativePath: '.deliveries/report.html'
         })
       ]);
     });

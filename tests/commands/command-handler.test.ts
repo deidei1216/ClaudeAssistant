@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
-import { CommandHandler } from '../../src/commands';
-import { buildBuiltInCommands } from '../../src/commands/built-in/help';
-import { AgentMessage, SessionProfile } from '../../src/core/types';
+import { CommandHandler } from '../../commands';
+import { buildBuiltInCommands } from '../../commands/help';
+import { AgentMessage, SessionProfile } from '../../core/types';
 
 describe('CommandHandler', () => {
   // Helper to create a default session

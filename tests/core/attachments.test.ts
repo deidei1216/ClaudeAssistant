@@ -7,7 +7,7 @@ import {
   extractFileMarkers,
   resolveOutboundAttachment,
   sanitizeAttachmentName
-} from '../../src/core/attachments';
+} from '../../core/attachments';
 
 describe('attachments utilities', () => {
   afterEach(() => {
@@ -116,76 +116,104 @@ describe('attachments utilities', () => {
   });
 
   it('resolves a safe outbound attachment path inside the working directory', () => {
-    const workingDirectory = mkdtempSync(join(tmpdir(), 'attachments-'));
+    const sessionRoot = mkdtempSync(join(tmpdir(), 'attachments-'));
+    const workingDirectory = join(sessionRoot, 'workspace');
+    mkdirSync(join(workingDirectory, '.deliveries', 'exports'), { recursive: true });
 
-    const result = resolveOutboundAttachment(workingDirectory, 'exports/report.txt');
+    const result = resolveOutboundAttachment(workingDirectory, '.deliveries/exports/report.txt');
 
     expect(result).toEqual({
       ok: true,
-      relativePath: 'exports/report.txt',
-      absolutePath: join(workingDirectory, 'exports/report.txt')
+      relativePath: '.deliveries/exports/report.txt',
+      absolutePath: join(workingDirectory, '.deliveries', 'exports', 'report.txt')
     });
   });
 
-  it('resolves traversal paths outside the working directory when explicitly requested', () => {
-    const workingDirectory = mkdtempSync(join(tmpdir(), 'attachments-'));
+  it('accepts workspace-prefixed outbound paths only when they target deliveries', () => {
+    const sessionRoot = mkdtempSync(join(tmpdir(), 'attachments-'));
+    const workingDirectory = join(sessionRoot, 'workspace');
+    mkdirSync(join(workingDirectory, '.deliveries'), { recursive: true });
 
-    const result = resolveOutboundAttachment(workingDirectory, '../escape.txt');
+    const result = resolveOutboundAttachment(workingDirectory, 'workspace/.deliveries/report.txt');
 
     expect(result).toEqual({
       ok: true,
-      relativePath: '../escape.txt',
-      absolutePath: join(workingDirectory, '..', 'escape.txt')
+      relativePath: '.deliveries/report.txt',
+      absolutePath: join(workingDirectory, '.deliveries', 'report.txt')
+    });
+  });
+
+  it('rejects outbound attachment paths that are not published into deliveries', () => {
+    const sessionRoot = mkdtempSync(join(tmpdir(), 'attachments-'));
+    const workingDirectory = join(sessionRoot, 'workspace');
+    mkdirSync(join(workingDirectory, 'exports'), { recursive: true });
+
+    expect(resolveOutboundAttachment(workingDirectory, 'exports/report.txt')).toEqual({
+      ok: false,
+      reason: 'Path is outside the published deliveries boundary'
     });
   });
 
   it('rejects an existing subdirectory as an attachment target', () => {
-    const workingDirectory = mkdtempSync(join(tmpdir(), 'attachments-'));
-    mkdirSync(join(workingDirectory, 'exports'));
+    const sessionRoot = mkdtempSync(join(tmpdir(), 'attachments-'));
+    const workingDirectory = join(sessionRoot, 'workspace');
+    mkdirSync(join(workingDirectory, '.deliveries', 'exports'), { recursive: true });
 
-    expect(resolveOutboundAttachment(workingDirectory, 'exports')).toEqual({
+    expect(resolveOutboundAttachment(workingDirectory, '.deliveries/exports')).toEqual({
       ok: false,
       reason: 'Path points to a directory'
     });
   });
 
   it('rejects directory-valued outbound paths that resolve back to the working directory', () => {
-    const workingDirectory = mkdtempSync(join(tmpdir(), 'attachments-'));
+    const sessionRoot = mkdtempSync(join(tmpdir(), 'attachments-'));
+    const workingDirectory = join(sessionRoot, 'workspace');
+    mkdirSync(join(workingDirectory, '.deliveries'), { recursive: true });
 
     expect(resolveOutboundAttachment(workingDirectory, '.')).toEqual({
       ok: false,
-      reason: 'Path points to a directory'
+      reason: 'Path is outside the published deliveries boundary'
     });
 
-    expect(resolveOutboundAttachment(workingDirectory, 'subdir/..')).toEqual({
+    expect(resolveOutboundAttachment(workingDirectory, '.deliveries/subdir/..')).toEqual({
       ok: false,
       reason: 'Path points to a directory'
     });
   });
 
-  it('resolves outbound paths that traverse through a symlinked directory inside the working directory', () => {
-    const workingDirectory = mkdtempSync(join(tmpdir(), 'attachments-'));
+  it('rejects outbound paths that traverse through a symlinked directory outside deliveries', () => {
+    const sessionRoot = mkdtempSync(join(tmpdir(), 'attachments-'));
+    const workingDirectory = join(sessionRoot, 'workspace');
+    mkdirSync(workingDirectory, { recursive: true });
     const outsideDirectory = mkdtempSync(join(tmpdir(), 'attachments-outside-'));
     symlinkSync(outsideDirectory, join(workingDirectory, 'exports'));
 
-    const result = resolveOutboundAttachment(workingDirectory, 'exports/report.txt');
-
-    expect(result).toEqual({
-      ok: true,
-      relativePath: 'exports/report.txt',
-      absolutePath: join(workingDirectory, 'exports', 'report.txt')
+    expect(resolveOutboundAttachment(workingDirectory, 'exports/report.txt')).toEqual({
+      ok: false,
+      reason: 'Path is outside the published deliveries boundary'
     });
   });
 
-  it('resolves absolute outbound paths', () => {
-    const workingDirectory = mkdtempSync(join(tmpdir(), 'attachments-'));
+  it('rejects absolute outbound paths outside deliveries', () => {
+    const sessionRoot = mkdtempSync(join(tmpdir(), 'attachments-'));
+    const workingDirectory = join(sessionRoot, 'workspace');
 
-    const result = resolveOutboundAttachment(workingDirectory, '/etc/passwd');
+    expect(resolveOutboundAttachment(workingDirectory, '/etc/passwd')).toEqual({
+      ok: false,
+      reason: 'Path is outside the published deliveries boundary'
+    });
+  });
 
-    expect(result).toEqual({
-      ok: true,
-      relativePath: '/etc/passwd',
-      absolutePath: '/etc/passwd'
+  it('rejects symlinked outbound paths under deliveries when they resolve outside the deliveries root', () => {
+    const sessionRoot = mkdtempSync(join(tmpdir(), 'attachments-'));
+    const workingDirectory = join(sessionRoot, 'workspace');
+    const outsideDirectory = mkdtempSync(join(tmpdir(), 'attachments-outside-'));
+    mkdirSync(join(workingDirectory, '.deliveries'), { recursive: true });
+    symlinkSync(outsideDirectory, join(workingDirectory, '.deliveries', 'linked'));
+
+    expect(resolveOutboundAttachment(workingDirectory, '.deliveries/linked/report.txt')).toEqual({
+      ok: false,
+      reason: 'Path is outside the published deliveries boundary'
     });
   });
 });

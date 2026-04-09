@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { DiscordAdapter } from '../../../src/adapters/discord';
+import { DiscordAdapter } from '../../../adapters/discord';
 
 describe('DiscordAdapter', () => {
   afterEach(() => {
@@ -8,21 +8,23 @@ describe('DiscordAdapter', () => {
 
   it('triggers the Discord typing indicator for text channels', async () => {
     const sendTyping = vi.fn().mockResolvedValue(undefined);
+    const login = vi.fn().mockResolvedValue('logged-in');
     const fetch = vi.fn().mockResolvedValue({
       isTextBased: () => true,
       sendTyping
     });
     const client = {
       on: vi.fn(),
-      login: vi.fn(),
+      login,
       destroy: vi.fn(),
       channels: { fetch }
     };
     const adapter = new DiscordAdapter(client as never);
 
     await adapter.initialize({ enabled: true, token: 'test-token' });
-    await adapter.typing?.('channel-1');
+    await adapter.setTyping?.('channel-1', true);
 
+    expect(login).toHaveBeenCalledWith('test-token');
     expect(fetch).toHaveBeenCalledWith('channel-1');
     expect(sendTyping).toHaveBeenCalled();
   });
@@ -50,8 +52,7 @@ describe('DiscordAdapter', () => {
       messageLimits: { maxLength: 5 }
     });
 
-    const result = await adapter.send('channel-1', {
-      content: 'helloworld',
+    const result = await adapter.sendMessage('channel-1', 'helloworld', {
       attachments: [
         {
           id: 'attachment-1',
@@ -89,8 +90,7 @@ describe('DiscordAdapter', () => {
 
     await adapter.initialize({ enabled: true, token: 'test-token' });
 
-    const result = await adapter.send('channel-1', {
-      content: '',
+    const result = await adapter.sendMessage('channel-1', '', {
       attachments: [
         {
           id: 'attachment-2',
@@ -109,13 +109,38 @@ describe('DiscordAdapter', () => {
     });
     expect(result).toEqual({ messageId: 'message-file-only', success: true });
   });
-});
 
-describe('DiscordAdapter control support', () => {
-  it('registers reaction and reply listeners during initialize', async () => {
-    const on = vi.fn();
+  it('maps replyTo into the outbound Discord payload', async () => {
+    const send = vi.fn().mockResolvedValue({ id: 'message-reply' });
+    const fetch = vi.fn().mockResolvedValue({
+      isTextBased: () => true,
+      send
+    });
+    const client = {
+      on: vi.fn(),
+      login: vi.fn(),
+      destroy: vi.fn(),
+      channels: { fetch }
+    };
+    const adapter = new DiscordAdapter(client as never);
+
+    await adapter.initialize({ enabled: true, token: 'test-token' });
+
+    const result = await adapter.sendMessage('channel-1', 'reply body', {
+      replyTo: 'source-message-1'
+    });
+
+    expect(send).toHaveBeenCalledWith({
+      content: 'reply body',
+      reply: {
+        messageReference: 'source-message-1'
+      }
+    });
+    expect(result).toEqual({ messageId: 'message-reply', success: true });
+  });
+  it('initializes without exposing control-only callbacks', async () => {
     const adapter = new DiscordAdapter({
-      on,
+      on: vi.fn(),
       login: vi.fn(),
       destroy: vi.fn(),
       channels: { fetch: vi.fn() }
@@ -123,115 +148,26 @@ describe('DiscordAdapter control support', () => {
 
     await adapter.initialize({ enabled: true, token: 'token' });
 
-    expect(on).toHaveBeenCalled();
+    expect(adapter.type).toBe('discord');
+    expect(typeof adapter.onMessage).toBe('function');
+    expect(typeof adapter.sendMessage).toBe('function');
+    expect(typeof adapter.setTyping).toBe('function');
+    expect(typeof adapter.stop).toBe('function');
+    expect('onControlInput' in adapter).toBe(false);
   });
 
-  it('logs reply metadata before dispatching control input', async () => {
-    const handlers = new Map<string, (...args: any[]) => void>();
-    const logger = {
-      info: vi.fn(),
-      warn: vi.fn(),
-      error: vi.fn()
-    };
-    const client = {
-      on: vi.fn((event: string, handler: (...args: any[]) => void) => {
-        handlers.set(event, handler);
-      }),
+  it('stops by destroying the Discord client', async () => {
+    const destroy = vi.fn();
+    const adapter = new DiscordAdapter({
+      on: vi.fn(),
       login: vi.fn(),
-      destroy: vi.fn(),
+      destroy,
       channels: { fetch: vi.fn() }
-    };
-    const adapter = new DiscordAdapter(client as never, logger as never);
-    const controlCallback = vi.fn();
+    } as never);
 
-    await adapter.initialize({ enabled: true, token: 'token' });
-    adapter.onControlInput(controlCallback);
+    await adapter.stop?.();
 
-    const messageCreate = handlers.get('messageCreate');
-    messageCreate?.({
-      id: 'reply-1',
-      channelId: 'thread-1',
-      channel: {
-        isThread: () => true
-      },
-      author: {
-        id: 'user-1',
-        bot: false,
-        username: 'deidei'
-      },
-      content: '继续执行',
-      reference: {
-        messageId: 'control-message-1'
-      },
-      createdAt: new Date('2026-04-01T00:00:00.000Z')
-    });
-
-    expect(logger.info).toHaveBeenCalledWith(
-      expect.objectContaining({
-        channelId: 'thread-1',
-        replyToMessageId: 'control-message-1',
-        authorId: 'user-1',
-        content: '继续执行'
-      }),
-      'Discord reply received for control processing'
-    );
-    expect(controlCallback).toHaveBeenCalledWith(
-      expect.objectContaining({
-        messageId: 'control-message-1',
-        signal: 'resume'
-      })
-    );
-  });
-
-  it('preserves logger binding when logging reply metadata', async () => {
-    const handlers = new Map<string, (...args: any[]) => void>();
-    const logger = {
-      marker: 'discord-adapter-logger',
-      info(this: { marker: string }, data: unknown, message: string) {
-        if (this.marker !== 'discord-adapter-logger') {
-          throw new Error('logger binding lost');
-        }
-        expect(message).toBe('Discord reply received for control processing');
-        expect(data).toEqual(
-          expect.objectContaining({
-            channelId: 'thread-1',
-            replyToMessageId: 'control-message-1'
-          })
-        );
-      }
-    };
-    const client = {
-      on: vi.fn((event: string, handler: (...args: any[]) => void) => {
-        handlers.set(event, handler);
-      }),
-      login: vi.fn(),
-      destroy: vi.fn(),
-      channels: { fetch: vi.fn() }
-    };
-    const adapter = new DiscordAdapter(client as never, logger as never);
-
-    await adapter.initialize({ enabled: true, token: 'token' });
-    adapter.onControlInput(vi.fn());
-
-    const messageCreate = handlers.get('messageCreate');
-
-    expect(() =>
-      messageCreate?.({
-        id: 'reply-1',
-        channelId: 'thread-1',
-        channel: { isThread: () => true },
-        author: {
-          id: 'user-1',
-          bot: false,
-          username: 'deidei'
-        },
-        content: '继续执行',
-        reference: {
-          messageId: 'control-message-1'
-        },
-        createdAt: new Date('2026-04-01T00:00:00.000Z')
-      })
-    ).not.toThrow();
+    expect(destroy).toHaveBeenCalledTimes(1);
   });
 
   it('downloads inbound attachments before forwarding a normal message', async () => {
@@ -252,7 +188,7 @@ describe('DiscordAdapter control support', () => {
       channels: { fetch: vi.fn() }
     };
     const adapter = new DiscordAdapter(client as never);
-    const onMessage = vi.fn();
+    const onMessage = vi.fn().mockResolvedValue(undefined);
 
     await adapter.initialize({ enabled: true, token: 'token' });
     adapter.onMessage(onMessage);
@@ -322,7 +258,7 @@ describe('DiscordAdapter control support', () => {
       channels: { fetch: vi.fn() }
     };
     const adapter = new DiscordAdapter(client as never, logger as never);
-    const onMessage = vi.fn();
+    const onMessage = vi.fn().mockResolvedValue(undefined);
 
     await adapter.initialize({ enabled: true, token: 'token' });
     adapter.onMessage(onMessage);

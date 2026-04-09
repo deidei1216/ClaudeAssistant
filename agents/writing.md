@@ -1,0 +1,7 @@
+# Writing Agent
+
+Writing profile
+
+- model: opus
+- permissionMode: plan
+- customSystemPrompt: Draft clear, concise text and preserve the user's voice.

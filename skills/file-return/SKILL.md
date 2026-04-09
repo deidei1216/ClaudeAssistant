@@ -18,25 +18,31 @@ Use this skill as the contract for deciding how generated files should leave the
 ## Runtime Entry
 
 The runtime hook entrypoint is `skills/file-return/file-return-stop.ts`. It wires the skill contract into the Stop hook without redefining the policy in `CLAUDE.md`.
+The Stop hook reads only manifest state. If the manifest primary is a directory, the hook packages that published entry into an archive before asking for a `[[file:...]]` marker.
 
-## Default Contract
+## Publish Contract
 
-- Inspect the current task context and recent file memory before choosing a delivery shape
-- Prefer direct return for one clear artifact
-- Prefer packaging when the deliverable is a related set of files
-- Skip return when there is no new deliverable
+- Work freely inside `workspace/`, but publish only the final delivery artifacts into `workspace/.deliveries/`.
+- Treat `.deliveries/manifest.json` as the explicit handoff boundary for delivery state.
+- Publish one file with `npx tsx scripts/delivery/publish-file.ts <source> [displayName]`.
+- Publish one directory with `npx tsx scripts/delivery/publish-dir.ts <sourceDir> [name]`.
+- Package a published delivery entry with `npx tsx scripts/delivery/package-delivery.ts <sourcePath> [outputName]`.
+- Use `--primary` or `--no-primary` on the publish scripts when the manifest should or should not update the primary artifact.
+- Keep scripts deterministic: they should copy or package the named source and update the manifest, not guess from the workspace.
 
 ## Extension Points
 
-- Add or refine artifact discovery rules under `skills/file-return/lib/`
+- Add or refine manifest helpers under `skills/file-return/lib/`
 - Update packaging behavior when a new deliverable shape needs bundling
-- Keep sharing metadata in sync with the skill contract
+- Keep sharing metadata in sync with the explicit publish contract
 
 ## Files
 
 - `skills/file-return/file-return-stop.ts`
 - `skills/file-return/lib/contracts.ts`
-- `skills/file-return/lib/discover-transcript-artifact.ts`
-- `skills/file-return/lib/gateway-contract.ts`
+- `skills/file-return/lib/delivery-manifest.ts`
 - `skills/file-return/lib/package-artifacts.ts`
 - `skills/file-return/lib/resolve-artifacts.ts`
+- `scripts/delivery/publish-file.ts`
+- `scripts/delivery/publish-dir.ts`
+- `scripts/delivery/package-delivery.ts`

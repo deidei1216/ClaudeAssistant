@@ -2,6 +2,8 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
+import { buildSessionClaudeMd } from '../../core/session-claude-md';
+import { writeDeliveryManifest } from '../../skills/file-return/lib/delivery-manifest';
 
 interface ClaudeResultPayload {
   type?: string;
@@ -14,7 +16,9 @@ interface ClaudeResultPayload {
 
 export interface FileReturnE2EFixture {
   workingDirectory: string;
-  expectedMarker: string;
+  expectedMarkers: string[];
+  forbiddenSnippets?: string[];
+  prompt: string;
 }
 
 export function getFileReturnStopHookPath(): string {
@@ -23,57 +27,96 @@ export function getFileReturnStopHookPath(): string {
 
 export function createFileReturnE2EFixture(rootDirectory: string): FileReturnE2EFixture {
   const workingDirectory = resolve(rootDirectory);
-  const outboxDirectory = join(workingDirectory, '.claude-gateway', 'outbox');
-  const memoryDirectory = join(workingDirectory, '.claude-gateway', 'memory');
-  const relativePath = '.claude-gateway/outbox/demo.txt';
+  const deliveriesDirectory = join(workingDirectory, '.deliveries');
+  const relativePath = '.deliveries/demo.txt';
   const absolutePath = join(workingDirectory, relativePath);
 
-  mkdirSync(outboxDirectory, { recursive: true });
-  mkdirSync(memoryDirectory, { recursive: true });
+  mkdirSync(deliveriesDirectory, { recursive: true });
+  writeFileSync(join(workingDirectory, 'CLAUDE.md'), buildSessionClaudeMd());
   writeFileSync(absolutePath, 'final report');
-  writeFileSync(
-    join(memoryDirectory, 'recent-files.json'),
-    JSON.stringify({
-      recentFiles: [
-        {
-          id: `workspace:${relativePath}`,
-          displayName: 'demo.txt',
-          relativePath,
-          absolutePath,
-          source: 'workspace_detected',
-          mediaType: 'text/plain',
-          lastSeenAt: '2026-04-02T00:00:00.000Z',
-          summary: 'generated report'
-        }
-      ]
-    })
-  );
+  writeDeliveryManifest(workingDirectory, {
+    version: 1,
+    entries: [
+      {
+        kind: 'file',
+        path: 'demo.txt',
+        sourcePath: 'demo.txt',
+        packaged: false
+      }
+    ],
+    primary: 'demo.txt'
+  });
 
   return {
     workingDirectory,
-    expectedMarker: `[[file:${relativePath}]]`
+    expectedMarkers: [`[[file:${relativePath}]]`],
+    prompt: '把刚才那个文件直接发给我'
   };
+}
+
+export function createMultiFileDirectReturnE2EFixture(rootDirectory: string): FileReturnE2EFixture {
+  const workingDirectory = resolve(rootDirectory);
+  const deliveriesDirectory = join(workingDirectory, '.deliveries');
+  const fileNames = ['crop_左上.png', 'crop_右上.png', 'crop_左下.png', 'crop_右下.png'];
+
+  mkdirSync(deliveriesDirectory, { recursive: true });
+  writeFileSync(join(workingDirectory, 'CLAUDE.md'), buildSessionClaudeMd());
+
+  for (const fileName of fileNames) {
+    writeFileSync(join(deliveriesDirectory, fileName), `${fileName} bytes`);
+  }
+
+  writeDeliveryManifest(workingDirectory, {
+    version: 1,
+    entries: fileNames.map((fileName) => ({
+      kind: 'file' as const,
+      path: fileName,
+      sourcePath: fileName,
+      packaged: false
+    })),
+    primary: fileNames[fileNames.length - 1] ?? null
+  });
+
+  return {
+    workingDirectory,
+    expectedMarkers: fileNames.map((fileName) => `[[file:.deliveries/${fileName}]]`),
+    forbiddenSnippets: ['.zip', '[[file:.deliveries/4等份裁剪.zip]]'],
+    prompt: '把这 4 张已发布图片直接发给我，不要压缩包。为每张图片各输出一个 [[file:...]] marker，并且每个 marker 单独占一行。'
+  };
+}
+
+export function createFileReturnE2ESettings(rootDirectory: string): string {
+  const settingsPath = join(resolve(rootDirectory), 'claude-settings.json');
+  writeFileSync(
+    settingsPath,
+    JSON.stringify(
+      {
+        hooks: {
+          Stop: [
+            {
+              hooks: [
+                {
+                  type: 'command',
+                  command: `npx tsx ${getFileReturnStopHookPath()}`
+                }
+              ]
+            }
+          ]
+        }
+      },
+      null,
+      2
+    )
+  );
+
+  return settingsPath;
 }
 
 function runClaudePrint(
   workingDirectory: string,
   prompt: string
 ): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-  const hookScriptPath = getFileReturnStopHookPath();
-  const settings = JSON.stringify({
-    hooks: {
-      Stop: [
-        {
-          hooks: [
-            {
-              type: 'command',
-              command: `npx tsx ${hookScriptPath}`
-            }
-          ]
-        }
-      ]
-    }
-  });
+  const settingsPath = createFileReturnE2ESettings(workingDirectory);
 
   return new Promise((resolvePromise, reject) => {
     const child = spawn(
@@ -85,7 +128,7 @@ function runClaudePrint(
         '--permission-mode',
         'auto',
         '--settings',
-        settings,
+        settingsPath,
         '--tools',
         '',
         '--append-system-prompt',
@@ -116,7 +159,11 @@ function runClaudePrint(
   });
 }
 
-export function assertFileReturnE2EResult(stdout: string, expectedMarker: string): ClaudeResultPayload {
+export function assertFileReturnE2EResult(
+  stdout: string,
+  expectedMarkers: string[],
+  forbiddenSnippets: string[] = []
+): ClaudeResultPayload {
   const parsed = JSON.parse(stdout) as ClaudeResultPayload;
 
   if (parsed.is_error) {
@@ -127,8 +174,16 @@ export function assertFileReturnE2EResult(stdout: string, expectedMarker: string
     throw new Error('Claude returned a result payload without a string result');
   }
 
-  if (!parsed.result.includes(expectedMarker)) {
-    throw new Error(`Expected Claude result to include ${expectedMarker}, got: ${parsed.result}`);
+  for (const expectedMarker of expectedMarkers) {
+    if (!parsed.result.includes(expectedMarker)) {
+      throw new Error(`Expected Claude result to include ${expectedMarker}, got: ${parsed.result}`);
+    }
+  }
+
+  for (const forbiddenSnippet of forbiddenSnippets) {
+    if (parsed.result.includes(forbiddenSnippet)) {
+      throw new Error(`Expected Claude result not to include ${forbiddenSnippet}, got: ${parsed.result}`);
+    }
   }
 
   return parsed;
@@ -136,6 +191,10 @@ export function assertFileReturnE2EResult(stdout: string, expectedMarker: string
 
 async function main(): Promise<void> {
   const keepTempDirectory = process.argv.includes('--keep-temp');
+  const scenarioFlagIndex = process.argv.indexOf('--scenario');
+  const scenario = scenarioFlagIndex >= 0 && process.argv[scenarioFlagIndex + 1]
+    ? process.argv[scenarioFlagIndex + 1]
+    : 'single-file';
   const attemptsFlagIndex = process.argv.indexOf('--attempts');
   const attemptCount =
     attemptsFlagIndex >= 0 && process.argv[attemptsFlagIndex + 1]
@@ -145,24 +204,31 @@ async function main(): Promise<void> {
 
   for (let attempt = 1; attempt <= attemptCount; attempt += 1) {
     const rootDirectory = mkdtempSync(join(tmpdir(), 'file-return-stop-hook-e2e-'));
-    const fixture = createFileReturnE2EFixture(rootDirectory);
+    const fixture = scenario === 'multi-file-direct'
+      ? createMultiFileDirectReturnE2EFixture(rootDirectory)
+      : createFileReturnE2EFixture(rootDirectory);
 
     try {
-      const result = await runClaudePrint(fixture.workingDirectory, '把刚才那个文件直接发给我');
+      const result = await runClaudePrint(fixture.workingDirectory, fixture.prompt);
 
       if (result.exitCode !== 0) {
         throw new Error(`claude exited with status ${result.exitCode}: ${result.stderr || result.stdout}`);
       }
 
-      const parsed = assertFileReturnE2EResult(result.stdout, fixture.expectedMarker);
+      const parsed = assertFileReturnE2EResult(
+        result.stdout,
+        fixture.expectedMarkers,
+        fixture.forbiddenSnippets
+      );
 
       process.stdout.write(
         JSON.stringify(
           {
             ok: true,
             attempt,
+            scenario,
             workingDirectory: fixture.workingDirectory,
-            expectedMarker: fixture.expectedMarker,
+            expectedMarkers: fixture.expectedMarkers,
             sessionId: parsed.session_id,
             numTurns: parsed.num_turns,
             result: parsed.result

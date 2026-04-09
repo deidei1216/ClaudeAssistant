@@ -48,11 +48,11 @@ The source design doc covers multiple independent subsystems. This plan only imp
 - Create: `src/core/gateway.ts`
 - Create: `src/commands/types.ts`
 - Create: `src/commands/index.ts`
-- Create: `src/commands/built-in/model.ts`
-- Create: `src/commands/built-in/cd.ts`
-- Create: `src/commands/built-in/profile.ts`
-- Create: `src/commands/built-in/help.ts`
-- Create: `src/commands/built-in/status.ts`
+- Create: `src/commands/model.ts`
+- Create: `src/commands/cd.ts`
+- Create: `src/commands/profile.ts`
+- Create: `src/commands/help.ts`
+- Create: `src/commands/status.ts`
 - Create: `src/adapters/index.ts`
 - Create: `src/adapters/discord/index.ts`
 - Create: `src/adapters/discord/message-formatter.ts`
@@ -1008,11 +1008,11 @@ git commit -m "feat: add claude code worker"
 **Files:**
 - Create: `src/commands/types.ts`
 - Create: `src/commands/index.ts`
-- Create: `src/commands/built-in/model.ts`
-- Create: `src/commands/built-in/cd.ts`
-- Create: `src/commands/built-in/profile.ts`
-- Create: `src/commands/built-in/help.ts`
-- Create: `src/commands/built-in/status.ts`
+- Create: `src/commands/model.ts`
+- Create: `src/commands/cd.ts`
+- Create: `src/commands/profile.ts`
+- Create: `src/commands/help.ts`
+- Create: `src/commands/status.ts`
 - Test: `tests/commands/command-handler.test.ts`
 
 - [ ] **Step 1: Write the failing command-handler test**
@@ -1020,7 +1020,7 @@ git commit -m "feat: add claude code worker"
 ```ts
 import { describe, expect, it, vi } from 'vitest';
 import { CommandHandler } from '../../src/commands';
-import { buildBuiltInCommands } from '../../src/commands/built-in/help';
+import { buildBuiltInCommands } from '../../src/commands/help';
 import { AgentMessage, SessionProfile } from '../../src/core/types';
 
 describe('CommandHandler', () => {
@@ -1269,7 +1269,7 @@ Expected: PASS with 1 test passed.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add src/commands/types.ts src/commands/index.ts src/commands/built-in/model.ts src/commands/built-in/cd.ts src/commands/built-in/profile.ts src/commands/built-in/help.ts src/commands/built-in/status.ts tests/commands/command-handler.test.ts
+git add src/commands/types.ts src/commands/index.ts src/commands/model.ts src/commands/cd.ts src/commands/profile.ts src/commands/help.ts src/commands/status.ts tests/commands/command-handler.test.ts
 git commit -m "feat: add session command handling"
 ```
 
@@ -1590,7 +1590,7 @@ import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { DiscordAdapter } from './adapters';
 import { CommandHandler } from './commands';
-import { buildBuiltInCommands } from './commands/built-in/help';
+import { buildBuiltInCommands } from './commands/help';
 import { loadGatewayConfig } from './config/gateway-config';
 import { AgentGateway } from './core/gateway';
 import { SessionOrchestrator } from './core/orchestrator';

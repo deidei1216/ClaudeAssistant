@@ -4,5 +4,8 @@ dist
 .env
 logs
 data
+.claude-gateway/
+sessions/
+.DS_Store
 !*.md
 !**/*.md

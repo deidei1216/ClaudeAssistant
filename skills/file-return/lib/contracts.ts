@@ -1,20 +1,9 @@
-export interface ArtifactSummary {
-  relativePath: string;
-  displayName: string;
-  summary: string;
-}
-
-export interface RecentFileMemoryRecord extends ArtifactSummary {
-  source?: string;
-}
-
 export interface ResolveArtifactsInput {
   cwd: string;
-  recentFiles: ArtifactSummary[];
 }
 
 export interface ResolveArtifactsResult {
-  mode: 'direct' | 'package' | 'none';
+  mode: 'direct' | 'package' | 'none' | 'orphaned_delivery' | 'invalid_delivery_state';
   files: string[];
 }
 

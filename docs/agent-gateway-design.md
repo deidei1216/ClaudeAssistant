@@ -439,7 +439,7 @@ agent-gateway/
 │   │
 │   ├── commands/                   # 命令处理
 │   │   ├── index.ts                # Command Handler
-│   │   ├── built-in/               # 内置命令
+│   │   ├──                # 内置命令
 │   │   │   ├── model.ts
 │   │   │   ├── cd.ts
 │   │   │   ├── profile.ts
@@ -627,7 +627,7 @@ agent-gateway/
 
 ### 9.2 添加新命令
 
-1. 在 `src/commands/built-in/` 创建命令文件
+1. 在 `src/commands/` 创建命令文件
 2. 实现 `CommandDefinition` 接口
 3. 在 `src/commands/index.ts` 注册命令
 

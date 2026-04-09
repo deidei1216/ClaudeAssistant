@@ -1,82 +1,82 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
-
-## Project Overview
-
-Agent Gateway MVP - 将 Discord 等消息平台连接到 Claude Code CLI 的服务。每个频道保持一个独立会话，支持模型切换、工作目录变更、配置模板加载等。
+This repository is a plugin-oriented ClaudeAssistant workspace. The current truth is a local Discord runtime for development, one session per channel, and supporting directories for agents, skills, hooks, tests, and build output.
 
 ## Commands
 
 ```bash
-npm run dev      # 开发模式 (tsx watch)
-npm run build    # TypeScript 编译
-npm start        # 运行编译后的代码
-npm test         # 运行测试 (vitest)
-npm run test:watch  # 监听模式测试
+npm run dev       # watch index.ts with tsx
+npm run build     # compile TypeScript to dist/
+npm start         # run the compiled build
+npm test          # run the Vitest suite
+npm run test:watch
 ```
 
 ## Architecture
 
-核心组件层次：
+Root-level layout:
 
+```text
+index.ts
+adapters/
+commands/
+core/
+skills/
+hooks/
+agents/
+sessions/
+tests/
 ```
-AgentGateway (入口层)
-    ├── ChannelAdapter (渠道适配器，如 DiscordAdapter)
-    ├── CommandHandler (斜杠命令解析)
-    └── SessionOrchestrator (会话编排)
-            ├── SessionStore (会话持久化)
-            ├── ProfileManager (配置模板)
-            └── ClaudeCodeWorker (CLI 执行器)
-```
 
-### 关键模块
+Key responsibilities:
 
-- **src/core/gateway.ts** - 统一入口，处理消息队列和错误恢复
-- **src/core/orchestrator.ts** - 会话生命周期管理，配置分发
-- **src/core/worker.ts** - 调用 `claude` CLI，构造命令参数
-- **src/core/adapter.ts** - `ChannelAdapter` 接口定义
-- **src/core/types.ts** - 核心类型 (`AgentMessage`, `SessionProfile` 等)
-
-### 内置命令
-
-位于 `src/commands/built-in/`:
-- `/model <name>` - 切换模型
-- `/cd <path>` - 叇换工作目录
-- `/profile <name>` - 加载配置模板
-- `/status` - 显示会话状态
-- `/help` - 命令帮助
+- `index.ts` starts the local Discord runtime.
+- `core/orchestrator.ts` manages session lifecycle and recovery.
+- `core/session-store.ts` persists session state.
+- `core/worker.ts` drives `claude` CLI execution.
+- `core/adapter.ts` defines the adapter surface.
+- `adapters/discord/` handles Discord-specific transport and formatting.
+- `commands/` contains built-in session commands.
+- `skills/file-return/` contains the file-return skill and helper scripts.
 
 ## Configuration
 
-- `config/gateway.json` - 默认模型、权限模式、工作目录
-- `config/adapters/discord.json` - Discord 配置（token 从环境变量读取）
-- `profiles/*.json` - 会话配置模板（model、allowedTools、customSystemPrompt 等）
+Use these current files only:
 
-会话数据存储在 `data/sessions/<channelType>/<channelId>.json`
+- `settings.json` for defaults, limits, enabled adapters, and logging.
+- `config/adapters/discord.json` for Discord adapter settings.
+- `.env.example` as the environment template.
+- `hooks/hooks.json` for shipped hook configuration.
+
+Session data lives under `sessions/<sessionId>/` and includes `session.json`, `workspace/`, `uploads/`, and session memory files.
+
+## File Delivery Contract
+
+- `sessions/<sessionId>/uploads/` stores user-provided source files and should be treated as read-only input.
+- `sessions/<sessionId>/workspace/` is Claude's working area for scratch files, edits, and intermediate artifacts.
+- `sessions/<sessionId>/workspace/.deliveries/` is the only valid delivery boundary.
+- Hooks and gateway code must only return content that was explicitly published into `workspace/.deliveries/`.
+
+## Built-In Commands
+
+- `/model <name>` switches the model for the current session.
+- `/cd <path>` changes the Claude working directory for the current session.
+- `/profile <name>` loads an agent definition from `agents/`.
+- `/status` prints the current session state.
+- `/help` lists the built-in commands.
 
 ## Testing
 
-测试位于 `tests/` 目录，结构与 `src/` 对应：
-```
-tests/
-├── adapters/discord/
-├── commands/
-├── config/
-└── core/
-```
+Tests live under `tests/` and mirror the root layout. Run a single file with:
 
-运行单个测试文件：
 ```bash
 npx vitest run tests/core/orchestrator.test.ts
 ```
 
 ## Environment
 
-必需环境变量（见 `.env.example`）：
-- `DISCORD_BOT_TOKEN` - Discord 机器人 token
+Required runtime prerequisites:
 
-运行要求：
 - Node.js 18.18+
-- `claude` CLI 已安装并认证
-- Discord bot 启用 message-content intent
+- `claude` CLI installed and authenticated
+- Discord bot token in `DISCORD_BOT_TOKEN`

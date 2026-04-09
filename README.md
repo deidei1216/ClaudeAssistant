@@ -1,6 +1,6 @@
-# ClaudeAssistant Agent Gateway
+# ClaudeAssistant
 
-This service connects Discord channels to Claude Code CLI while keeping one session per channel.
+ClaudeAssistant is a plugin-oriented repository with a local Discord runtime for development. It keeps one session per channel and includes the pieces that still matter today: sessions, agents, skills, hooks, file-return support, tests, and build tooling.
 
 ## Prerequisites
 
@@ -15,13 +15,24 @@ npm install
 cp .env.example .env
 ```
 
-Update `config/gateway.json` and `config/adapters/discord.json` if you need different defaults.
+Set `DISCORD_BOT_TOKEN` in `.env`, then adjust `settings.json` and `config/adapters/discord.json` if you need different local defaults.
 
-## Commands
+## What Lives Where
 
-- `/model <name>` switches the model for the current channel session.
-- `/cd <path>` changes the Claude working directory for the current channel session.
-- `/profile <name>` loads a JSON profile from `profiles/`.
+- `index.ts` starts the local Discord runtime.
+- `core/` contains session orchestration, storage, attachments, recent-file tracking, and worker integration.
+- `adapters/discord/` holds the Discord adapter and message formatting.
+- `commands/` contains the built-in channel commands.
+- `agents/` stores reusable agent definitions.
+- `skills/file-return/` contains the file-return skill and helper scripts.
+- `hooks/hooks.json` is the hook configuration shipped with the repo.
+- `sessions/<sessionId>/` stores session JSON, workspace state, uploads, and session memory.
+
+## Built-In Commands
+
+- `/model <name>` switches the model for the current session.
+- `/cd <path>` changes the Claude working directory for the current session.
+- `/profile <name>` loads an agent definition from `agents/`.
 - `/status` prints the current session state.
 - `/help` lists the built-in commands.
 
@@ -42,17 +53,3 @@ npm test
 ```bash
 npm run build
 ```
-
-## Control Layer
-
-The gateway now keeps a second state path for subagent display and operator control.
-
-- Normal chat messages still route into Claude sessions.
-- Control requests are stored under `data/control/`.
-- Discord threads can display subagent progress and pending approval prompts.
-- Claude-side hooks/skills can use:
-  - `npm run control:upsert-run -- --base-dir data/control ...`
-  - `npm run control:request -- --base-dir data/control ...`
-  - `npm run control:poll -- --base-dir data/control ...`
-- Control semantics are channel-agnostic: adapters normalize reactions, replies, buttons, or commands into the same control signal names.
-- Discord is the first implementation, but other adapters can emit the same `approve`, `reject`, `hold`, `adjust`, and `resume` meanings.

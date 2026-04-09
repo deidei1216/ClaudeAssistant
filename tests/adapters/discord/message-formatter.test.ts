@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { fromDiscordMessage, toDiscordChunks } from '../../../src/adapters/discord/message-formatter';
+import { fromDiscordMessage, toDiscordChunks } from '../../../adapters/discord/message-formatter';
 
 describe('discord message formatter', () => {
   it('converts a Discord message into the gateway message shape', () => {

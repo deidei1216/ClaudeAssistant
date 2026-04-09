@@ -1,9 +1,9 @@
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdirSync, mkdtempSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { ClaudeCodeWorker } from '../../src/core/worker';
-import { AgentMessage, SessionProfile } from '../../src/core/types';
+import { ClaudeCodeWorker } from '../../core/worker';
+import { AgentMessage, SessionProfile } from '../../core/types';
 
 describe('ClaudeCodeWorker', () => {
   const tempDirectories: string[] = [];
@@ -183,7 +183,6 @@ describe('ClaudeCodeWorker', () => {
     const prompt = runner.mock.calls[0]?.[1]?.at(-1);
 
     expect(prompt).toBe(message.content);
-    expect(prompt).not.toContain('Hidden file-return instructions:');
     expect(prompt).not.toContain('Recent files in this session:');
   });
 
@@ -353,6 +352,68 @@ describe('ClaudeCodeWorker', () => {
     expect(prompt).not.toContain('../');
   });
 
+  it('treats files in the sibling uploads directory as local session attachments', async () => {
+    const runner = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        type: 'result',
+        subtype: 'success',
+        is_error: false,
+        result: 'attachment-aware response',
+        session_id: 'attachment-session'
+      }),
+      stderr: '',
+      exitCode: 0
+    });
+    const sessionRoot = mkdtempSync(join(tmpdir(), 'attachment-session-'));
+    tempDirectories.push(sessionRoot);
+    const workingDirectory = join(sessionRoot, 'workspace');
+    const uploadsDirectory = join(sessionRoot, 'uploads');
+    mkdirSync(workingDirectory, { recursive: true });
+    mkdirSync(uploadsDirectory, { recursive: true });
+    const localUploadPath = join(uploadsDirectory, 'mockup.png');
+    writeFileSync(localUploadPath, 'png-bytes');
+
+    const worker = new ClaudeCodeWorker(runner);
+    const session: SessionProfile = {
+      id: 'attachment-session',
+      channelId: 'channel-attachments',
+      channelType: 'discord',
+      model: 'sonnet',
+      workingDirectory,
+      permissionMode: 'auto',
+      createdAt: new Date(),
+      lastActiveAt: new Date(),
+      status: 'active',
+      messageCount: 0
+    };
+    const message: AgentMessage = {
+      id: 'msg-attachments-uploads',
+      channelId: 'channel-attachments',
+      channelType: 'discord',
+      userId: 'user-attachments',
+      content: 'Review the uploaded mockup.',
+      attachments: [
+        {
+          id: 'att-3',
+          name: 'mockup.png',
+          type: 'image/png',
+          size: 1234,
+          url: 'https://cdn.discordapp.com/attachments/att-3',
+          localPath: localUploadPath
+        }
+      ],
+      timestamp: new Date()
+    };
+
+    await worker.execute(session, message);
+
+    const prompt = runner.mock.calls[0]?.[1]?.at(-1);
+
+    expect(prompt).toContain('Attached files:');
+    expect(prompt).toContain('uploads/mockup.png');
+    expect(prompt).not.toContain('https://cdn.discordapp.com/attachments/att-3');
+  });
+
   it('parses structured Claude JSON output and returns the result field', async () => {
     const runner = vi.fn().mockResolvedValue({
       stdout: JSON.stringify({
@@ -395,8 +456,8 @@ describe('ClaudeCodeWorker', () => {
   it('creates outbound attachments from valid file markers and strips them from the response', async () => {
     const workingDirectory = mkdtempSync(join(tmpdir(), 'claude-worker-'));
     tempDirectories.push(workingDirectory);
-    const artifactPath = join(workingDirectory, 'artifacts', 'report.txt');
-    mkdirSync(join(workingDirectory, 'artifacts'), { recursive: true });
+    const artifactPath = join(workingDirectory, '.deliveries', 'artifacts', 'report.txt');
+    mkdirSync(join(workingDirectory, '.deliveries', 'artifacts'), { recursive: true });
     writeFileSync(artifactPath, 'report contents');
 
     const runner = vi.fn().mockResolvedValue({
@@ -404,7 +465,7 @@ describe('ClaudeCodeWorker', () => {
         type: 'result',
         subtype: 'success',
         is_error: false,
-        result: 'Here is the report.\n[[file:artifacts/report.txt]]\nThanks!',
+        result: 'Here is the report.\n[[file:.deliveries/artifacts/report.txt]]\nThanks!',
         session_id: 'attachment-session'
       }),
       stderr: '',
@@ -444,7 +505,58 @@ describe('ClaudeCodeWorker', () => {
     ]);
   });
 
-  it('returns workspace-detected recent file candidates for newly created referenced artifacts', async () => {
+  it('creates outbound attachments when Claude emits workspace-prefixed file markers', async () => {
+    const workingDirectory = mkdtempSync(join(tmpdir(), 'claude-worker-'));
+    tempDirectories.push(workingDirectory);
+    const artifactPath = join(workingDirectory, '.deliveries', 'singer_cropped.png');
+    mkdirSync(join(workingDirectory, '.deliveries'), { recursive: true });
+    writeFileSync(artifactPath, 'png bytes');
+
+    const runner = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        type: 'result',
+        subtype: 'success',
+        is_error: false,
+        result: '已裁剪完成。\n[[file:workspace/.deliveries/singer_cropped.png]]',
+        session_id: 'attachment-session'
+      }),
+      stderr: '',
+      exitCode: 0
+    });
+    const worker = new ClaudeCodeWorker(runner);
+    const session: SessionProfile = {
+      id: 'attachment-session',
+      channelId: 'channel-outbound',
+      channelType: 'discord',
+      model: 'sonnet',
+      workingDirectory,
+      permissionMode: 'auto',
+      createdAt: new Date(),
+      lastActiveAt: new Date(),
+      status: 'active',
+      messageCount: 0
+    };
+    const message: AgentMessage = {
+      id: 'msg-outbound-workspace-prefix',
+      channelId: 'channel-outbound',
+      channelType: 'discord',
+      userId: 'user-outbound',
+      content: '发给我裁剪后的图片',
+      timestamp: new Date()
+    };
+
+    const response = await worker.execute(session, message);
+
+    expect(response.content).toBe('已裁剪完成。');
+    expect(response.attachments).toEqual([
+      expect.objectContaining({
+        name: 'singer_cropped.png',
+        localPath: artifactPath
+      })
+    ]);
+  });
+
+  it('does not return deprecated recent file candidate metadata for arbitrary referenced workspace artifacts', async () => {
     const workingDirectory = mkdtempSync(join(tmpdir(), 'worker-artifacts-'));
     tempDirectories.push(workingDirectory);
     const artifactPath = join(workingDirectory, 'outputs', 'report.html');
@@ -490,16 +602,10 @@ describe('ClaudeCodeWorker', () => {
       timestamp: new Date('2026-04-01T00:00:00.000Z')
     });
 
-    expect(response.metadata?.recentFileCandidates).toEqual([
-      expect.objectContaining({
-        source: 'workspace_detected',
-        relativePath: 'outputs/report.html',
-        summary: 'generated html'
-      })
-    ]);
+    expect('metadata' in response).toBe(false);
   });
 
-  it('tracks doc and ppt artifacts when they are newly created and referenced', async () => {
+  it('does not return deprecated recent file candidate metadata for doc and ppt content mentions', async () => {
     const workingDirectory = mkdtempSync(join(tmpdir(), 'worker-artifacts-'));
     tempDirectories.push(workingDirectory);
     const docPath = join(workingDirectory, 'outputs', 'summary.doc');
@@ -547,19 +653,10 @@ describe('ClaudeCodeWorker', () => {
       timestamp: new Date('2026-04-01T00:00:00.000Z')
     });
 
-    expect(response.metadata?.recentFileCandidates).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          relativePath: 'outputs/summary.doc'
-        }),
-        expect.objectContaining({
-          relativePath: 'outputs/slides.ppt'
-        })
-      ])
-    );
+    expect('metadata' in response).toBe(false);
   });
 
-  it('tracks json and txt artifacts when they are newly created and referenced', async () => {
+  it('does not return deprecated recent file candidate metadata for json and txt content mentions', async () => {
     const workingDirectory = mkdtempSync(join(tmpdir(), 'worker-artifacts-'));
     tempDirectories.push(workingDirectory);
     const jsonPath = join(workingDirectory, 'outputs', 'report.json');
@@ -607,16 +704,7 @@ describe('ClaudeCodeWorker', () => {
       timestamp: new Date('2026-04-01T00:00:00.000Z')
     });
 
-    expect(response.metadata?.recentFileCandidates).toEqual(
-      expect.arrayContaining([
-        expect.objectContaining({
-          relativePath: 'outputs/report.json'
-        }),
-        expect.objectContaining({
-          relativePath: 'outputs/notes.txt'
-        })
-      ])
-    );
+    expect('metadata' in response).toBe(false);
   });
 
   it('does not remember changed files that are not referenced in Claude output', async () => {
@@ -665,7 +753,7 @@ describe('ClaudeCodeWorker', () => {
       timestamp: new Date('2026-04-01T00:00:00.000Z')
     });
 
-    expect(response.metadata?.recentFileCandidates).toBeUndefined();
+    expect('metadata' in response).toBe(false);
   });
 
   it('does not treat inline file markers in prose as outbound attachments', async () => {
@@ -680,7 +768,7 @@ describe('ClaudeCodeWorker', () => {
         type: 'result',
         subtype: 'success',
         is_error: false,
-        result: 'Mention [[file:artifacts/report.txt]] inline, but do not attach it.',
+        result: 'Mention [[file:.deliveries/artifacts/report.txt]] inline, but do not attach it.',
         session_id: 'attachment-session'
       }),
       stderr: '',
@@ -711,7 +799,7 @@ describe('ClaudeCodeWorker', () => {
     const response = await worker.execute(session, message);
 
     expect(response.attachments).toBeUndefined();
-    expect(response.content).toBe('Mention [[file:artifacts/report.txt]] inline, but do not attach it.');
+    expect(response.content).toBe('Mention [[file:.deliveries/artifacts/report.txt]] inline, but do not attach it.');
   });
 
   it('does not treat standalone file markers inside fenced code blocks as outbound attachments', async () => {
@@ -726,7 +814,7 @@ describe('ClaudeCodeWorker', () => {
         type: 'result',
         subtype: 'success',
         is_error: false,
-        result: 'Use this example:\n```txt\n[[file:artifacts/report.txt]]\n```\nOutside the example.',
+        result: 'Use this example:\n```txt\n[[file:.deliveries/artifacts/report.txt]]\n```\nOutside the example.',
         session_id: 'attachment-session'
       }),
       stderr: '',
@@ -757,10 +845,10 @@ describe('ClaudeCodeWorker', () => {
     const response = await worker.execute(session, message);
 
     expect(response.attachments).toBeUndefined();
-    expect(response.content).toBe('Use this example:\n```txt\n[[file:artifacts/report.txt]]\n```\nOutside the example.');
+    expect(response.content).toBe('Use this example:\n```txt\n[[file:.deliveries/artifacts/report.txt]]\n```\nOutside the example.');
   });
 
-  it('keeps unsafe outbound file markers out of attachments and adds a visible error note', async () => {
+  it('keeps unpublished outbound file markers out of attachments and adds a visible error note', async () => {
     const workingDirectory = mkdtempSync(join(tmpdir(), 'claude-worker-'));
     tempDirectories.push(workingDirectory);
 
@@ -769,7 +857,7 @@ describe('ClaudeCodeWorker', () => {
         type: 'result',
         subtype: 'success',
         is_error: false,
-        result: 'I could not attach that file.\n[[file:../../secret.txt]]',
+        result: 'I could not attach that file.\n[[file:exports/report.txt]]',
         session_id: 'attachment-session'
       }),
       stderr: '',
@@ -802,7 +890,53 @@ describe('ClaudeCodeWorker', () => {
     expect(response.attachments).toBeUndefined();
     expect(response.replyTo).toBe('msg-outbound-error');
     expect(response.content).toContain('I could not attach that file.');
-    expect(response.content).toContain('Could not attach ../../secret.txt');
+    expect(response.content).toContain('Could not attach exports/report.txt: Path is outside the published deliveries boundary.');
+  });
+
+  it('rejects symlinked outbound markers under deliveries when they resolve outside the published boundary', async () => {
+    const workingDirectory = mkdtempSync(join(tmpdir(), 'claude-worker-'));
+    const outsideDirectory = mkdtempSync(join(tmpdir(), 'claude-worker-outside-'));
+    tempDirectories.push(workingDirectory, outsideDirectory);
+    mkdirSync(join(workingDirectory, '.deliveries'), { recursive: true });
+    symlinkSync(outsideDirectory, join(workingDirectory, '.deliveries', 'linked'));
+    writeFileSync(join(outsideDirectory, 'report.txt'), 'report bytes');
+
+    const runner = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        type: 'result',
+        subtype: 'success',
+        is_error: false,
+        result: 'I could not attach that file.\n[[file:.deliveries/linked/report.txt]]',
+        session_id: 'attachment-session'
+      }),
+      stderr: '',
+      exitCode: 0
+    });
+    const worker = new ClaudeCodeWorker(runner);
+    const session: SessionProfile = {
+      id: 'attachment-session',
+      channelId: 'channel-outbound',
+      channelType: 'discord',
+      model: 'sonnet',
+      workingDirectory,
+      permissionMode: 'auto',
+      createdAt: new Date(),
+      lastActiveAt: new Date(),
+      status: 'active',
+      messageCount: 0
+    };
+
+    const response = await worker.execute(session, {
+      id: 'msg-outbound-symlink-error',
+      channelId: 'channel-outbound',
+      channelType: 'discord',
+      userId: 'user-outbound',
+      content: 'Send me the generated report.',
+      timestamp: new Date()
+    });
+
+    expect(response.attachments).toBeUndefined();
+    expect(response.content).toContain('Could not attach .deliveries/linked/report.txt: Path is outside the published deliveries boundary.');
   });
 
   it('does not invoke file-return scripts when Claude does not emit a marker', async () => {
@@ -817,14 +951,14 @@ describe('ClaudeCodeWorker', () => {
       JSON.stringify({
         recentFiles: [
           {
-            id: 'workspace:.claude-gateway/outbox/cropped-image.png',
+            id: 'claude_outbound:.deliveries/cropped-image.png',
             displayName: 'cropped-image.png',
-            relativePath: '.claude-gateway/outbox/cropped-image.png',
-            absolutePath: artifactPath,
-            source: 'workspace_detected',
+            relativePath: '.deliveries/cropped-image.png',
+            absolutePath: join(workingDirectory, '.deliveries', 'cropped-image.png'),
+            source: 'claude_outbound',
             mediaType: 'image/png',
             lastSeenAt: '2026-04-02T00:00:00.000Z',
-            summary: 'generated image'
+            summary: 'last sent image'
           }
         ]
       })

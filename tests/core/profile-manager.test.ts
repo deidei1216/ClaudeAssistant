@@ -2,7 +2,7 @@ import { mkdirSync, mkdtempSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { describe, expect, it } from 'vitest';
-import { ProfileManager, ProfileLoadError } from '../../src/core/profile-manager';
+import { ProfileManager, ProfileLoadError } from '../../core/profile-manager';
 
 describe('ProfileManager', () => {
   it('loads a profile and keeps only session-overridable fields', () => {

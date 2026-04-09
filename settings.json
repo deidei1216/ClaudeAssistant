@@ -1,0 +1,18 @@
+{
+  "defaults": {
+    "model": "sonnet",
+    "permissionMode": "auto"
+  },
+  "limits": {
+    "maxConcurrentSessions": 10,
+    "sessionTimeout": 3600000,
+    "maxTriggersPerSession": 50
+  },
+  "enabledAdapters": [
+    "discord"
+  ],
+  "logging": {
+    "level": "info",
+    "file": "logs/gateway.log"
+  }
+}
