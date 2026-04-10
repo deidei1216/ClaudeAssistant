@@ -1,0 +1,7 @@
+{
+  "name": "resume-screening",
+  "description": "简历筛选 Agent，用于根据岗位要求对候选人简历进行多维度评估。当收到 Word/PDF 简历文件时自动触发筛选流程。",
+  "model": "sonnet",
+  "skills": ["resume-screening"],
+  "permissionMode": "auto"
+}

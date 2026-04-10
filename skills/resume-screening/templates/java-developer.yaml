@@ -1,0 +1,20 @@
+# Java 开发工程师
+id: java-developer
+name: Java 开发工程师
+requiredSkills:
+  - Java
+  - Spring Boot
+  - MySQL
+  - Git
+bonusSkills:
+  - Redis
+  - Kafka
+  - 微服务架构
+  - Docker
+  - Kubernetes
+experienceYears: 3+
+education: 本科及以上
+otherRequirements:
+  - 有互联网项目经验优先
+  - 熟悉分布式系统设计优先
+  - 有高并发系统开发经验优先

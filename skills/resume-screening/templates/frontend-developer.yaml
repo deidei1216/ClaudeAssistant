@@ -1,0 +1,21 @@
+# 前端开发工程师
+id: frontend-developer
+name: 前端开发工程师
+requiredSkills:
+  - JavaScript
+  - TypeScript
+  - React
+  - HTML5
+  - CSS3
+bonusSkills:
+  - Vue.js
+  - Next.js
+  - Node.js
+  - Webpack
+  - Tailwind CSS
+experienceYears: 2+
+education: 本科及以上
+otherRequirements:
+  - 有大型前端项目经验优先
+  - 熟悉前端性能优化优先
+  - 有移动端开发经验优先
