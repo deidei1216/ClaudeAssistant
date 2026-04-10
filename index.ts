@@ -18,6 +18,28 @@ import { createLogger } from './utils/logger';
 async function main(): Promise<void> {
   const config = loadGatewayConfig('settings.json');
   const logger = createLogger(config.logging.level, config.logging.file);
+  process.on('uncaughtException', (error) => {
+    logger.error(
+      {
+        error: error.message,
+        stack: error.stack
+      },
+      'Uncaught exception'
+    );
+  });
+  process.on('unhandledRejection', (reason) => {
+    const error = reason instanceof Error ? reason : new Error(String(reason));
+    logger.error(
+      {
+        error: error.message,
+        stack: error.stack
+      },
+      'Unhandled rejection'
+    );
+  });
+  process.on('exit', (code) => {
+    logger.info({ code }, 'Process exiting');
+  });
   const adapters = await buildAdapters(config.enabledAdapters, logger);
   const projectRoot = process.cwd();
   const defaultClaudeSettingsPath = join(projectRoot, '.claude', 'settings.json');
@@ -48,6 +70,7 @@ async function main(): Promise<void> {
     adapters,
     commandHandler,
     orchestrator,
+    aggregation: config.aggregation,
     logger
   });
 

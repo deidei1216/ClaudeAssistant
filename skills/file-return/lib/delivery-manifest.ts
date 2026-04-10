@@ -13,6 +13,7 @@ export interface DeliveryManifest {
   version: 1;
   entries: DeliveryManifestEntry[];
   primary: string | null;
+  handoff?: string[];
 }
 
 const INITIAL_DELIVERY_MANIFEST: DeliveryManifest = {
@@ -45,11 +46,13 @@ export function validateDeliveryManifest(manifest: unknown): DeliveryManifest {
 
   const entries = candidate.entries.map(validateDeliveryManifestEntry);
   const primary = validatePrimary(candidate.primary, entries);
+  const handoff = validateHandoff(candidate.handoff, entries);
 
   return {
     version: 1,
     entries,
-    primary
+    primary,
+    ...(handoff ? { handoff } : {})
   };
 }
 
@@ -76,19 +79,37 @@ export function writeDeliveryManifest(workingDirectory: string, manifest: Delive
 export function upsertDeliveryManifestEntry(
   workingDirectory: string,
   entry: DeliveryManifestEntry,
-  options?: { primary?: boolean }
+  options?: {
+    primary?: boolean | null;
+    handoff?:
+      | { mode: 'preserve' }
+      | { mode: 'clear' }
+      | { mode: 'replace'; paths: string[] }
+      | { mode: 'append'; paths: string[] };
+  }
 ): DeliveryManifest {
   const manifest = readDeliveryManifest(workingDirectory);
   const validatedEntry = validateDeliveryManifestEntry(entry);
+  const nextEntries = [
+    ...manifest.entries.filter((existingEntry) => existingEntry.path !== validatedEntry.path),
+    validatedEntry
+  ];
 
   const nextManifest: DeliveryManifest = {
     version: manifest.version,
-    entries: [
-      ...manifest.entries.filter((existingEntry) => existingEntry.path !== validatedEntry.path),
-      validatedEntry
-    ],
-    primary: options?.primary ? validatedEntry.path : manifest.primary
+    entries: nextEntries,
+    primary:
+      options?.primary === true
+        ? validatedEntry.path
+        : options?.primary === null
+          ? null
+          : manifest.primary
   };
+  const nextHandoff = applyHandoffUpdate(manifest.handoff, nextEntries, options?.handoff);
+
+  if (nextHandoff) {
+    nextManifest.handoff = nextHandoff;
+  }
 
   writeDeliveryManifest(workingDirectory, nextManifest);
   return nextManifest;
@@ -142,6 +163,79 @@ function validatePrimary(
   }
 
   return normalizedPrimary;
+}
+
+function validateHandoff(
+  handoff: DeliveryManifest['handoff'] | undefined,
+  entries: DeliveryManifestEntry[]
+): DeliveryManifest['handoff'] | undefined {
+  if (handoff === undefined) {
+    return undefined;
+  }
+
+  if (!Array.isArray(handoff)) {
+    throw new Error('Delivery manifest handoff must be an array');
+  }
+
+  if (handoff.length === 0) {
+    return undefined;
+  }
+
+  const normalizedHandoff = handoff.map((path) => {
+    if (typeof path !== 'string' || !isSafeDeliveryPath(path)) {
+      throw new Error('Delivery manifest handoff paths must stay inside .deliveries');
+    }
+
+    const normalizedPath = normalizeManifestPath(path);
+    if (!entries.some((entry) => entry.path === normalizedPath)) {
+      throw new Error('Delivery manifest handoff paths must match existing entries');
+    }
+
+    return normalizedPath;
+  });
+
+  if (new Set(normalizedHandoff).size !== normalizedHandoff.length) {
+    throw new Error('Delivery manifest handoff paths must be unique');
+  }
+
+  return normalizedHandoff;
+}
+
+function applyHandoffUpdate(
+  currentHandoff: DeliveryManifest['handoff'] | undefined,
+  entries: DeliveryManifestEntry[],
+  update:
+    | {
+        mode: 'preserve';
+      }
+    | {
+        mode: 'clear';
+      }
+    | {
+        mode: 'replace';
+        paths: string[];
+      }
+    | {
+        mode: 'append';
+        paths: string[];
+      }
+    | undefined
+): DeliveryManifest['handoff'] | undefined {
+  const effectiveUpdate = update ?? { mode: 'preserve' as const };
+
+  if (effectiveUpdate.mode === 'clear') {
+    return undefined;
+  }
+
+  if (effectiveUpdate.mode === 'preserve') {
+    return validateHandoff(currentHandoff, entries);
+  }
+
+  const nextPaths = effectiveUpdate.mode === 'replace'
+    ? effectiveUpdate.paths
+    : [...(currentHandoff ?? []), ...effectiveUpdate.paths];
+
+  return validateHandoff(nextPaths, entries);
 }
 
 function isSafeDeliveryPath(value: string): boolean {

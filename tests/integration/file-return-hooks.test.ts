@@ -154,6 +154,57 @@ describe('file return skill scripts', () => {
     });
   });
 
+  it('publishes multiple standalone files into a manifest handoff batch with --multi', () => {
+    const workingDirectory = mkdtempSync(join(tmpdir(), 'file-return-publish-file-multi-'));
+    writeFileSync(join(workingDirectory, 'crop_左上.png'), 'left-top');
+    writeFileSync(join(workingDirectory, 'crop_右上.png'), 'right-top');
+
+    const scriptPath = join(process.cwd(), 'scripts', 'delivery', 'publish-file.ts');
+
+    expect(spawnSync(tsxPath, [scriptPath, 'crop_左上.png', '--multi'], {
+      cwd: workingDirectory,
+      encoding: 'utf8'
+    }).status).toBe(0);
+    expect(spawnSync(tsxPath, [scriptPath, 'crop_右上.png', '--multi'], {
+      cwd: workingDirectory,
+      encoding: 'utf8'
+    }).status).toBe(0);
+
+    expect(readDeliveryManifest(workingDirectory)).toEqual({
+      version: 1,
+      entries: [
+        {
+          kind: 'file',
+          path: 'crop_左上.png',
+          sourcePath: 'crop_左上.png',
+          packaged: false
+        },
+        {
+          kind: 'file',
+          path: 'crop_右上.png',
+          sourcePath: 'crop_右上.png',
+          packaged: false
+        }
+      ],
+      primary: null,
+      handoff: ['crop_左上.png', 'crop_右上.png']
+    });
+  });
+
+  it('rejects combining --multi with primary flags', () => {
+    const workingDirectory = mkdtempSync(join(tmpdir(), 'file-return-publish-file-multi-'));
+    writeFileSync(join(workingDirectory, 'report.txt'), 'ready');
+
+    const scriptPath = join(process.cwd(), 'scripts', 'delivery', 'publish-file.ts');
+    const result = spawnSync(tsxPath, [scriptPath, 'report.txt', '--multi', '--primary'], {
+      cwd: workingDirectory,
+      encoding: 'utf8'
+    });
+
+    expect(result.status).not.toBe(0);
+    expect(result.stderr).toContain('--multi cannot be combined');
+  });
+
   it('publishes a directory into workspace/.deliveries and records it without scanning the workspace', () => {
     const workingDirectory = mkdtempSync(join(tmpdir(), 'file-return-publish-dir-'));
     mkdirSync(join(workingDirectory, 'site'), { recursive: true });
@@ -479,7 +530,7 @@ describe('file return skill scripts', () => {
 
     expect(result.status).not.toBe(0);
     expect(result.stderr).toContain('published delivery entry');
-    expect(result.stderr).toContain('return multiple [[file:...]] markers instead of creating a zip');
+    expect(result.stderr).toContain('publish each file separately instead of creating a zip');
     expect(result.stderr).toContain('first publish a directory with publish-dir');
     expect(readDeliveryManifest(workingDirectory)).toEqual({
       version: 1,
@@ -609,6 +660,111 @@ describe('file return skill scripts', () => {
         }
       ],
       primary: 'site.zip'
+    });
+  });
+
+  it('blocks stop once and asks Claude to emit all manifest handoff lines for a direct multi-file delivery', async () => {
+    const workingDirectory = mkdtempSync(join(tmpdir(), 'file-return-stop-hook-multi-'));
+    mkdirSync(join(workingDirectory, '.deliveries'), { recursive: true });
+    writeFileSync(join(workingDirectory, '.deliveries', 'crop_左上.png'), 'left-top');
+    writeFileSync(join(workingDirectory, '.deliveries', 'crop_右上.png'), 'right-top');
+    writeDeliveryManifest(workingDirectory, {
+      version: 1,
+      entries: [
+        {
+          kind: 'file',
+          path: 'crop_左上.png',
+          sourcePath: 'crop_左上.png',
+          packaged: false
+        },
+        {
+          kind: 'file',
+          path: 'crop_右上.png',
+          sourcePath: 'crop_右上.png',
+          packaged: false
+        }
+      ],
+      primary: null,
+      handoff: ['crop_左上.png', 'crop_右上.png']
+    });
+
+    const result = await runFileReturnStopHook({
+      session_id: 'session-1',
+      transcript_path: join(workingDirectory, '.claude', 'transcript.jsonl'),
+      cwd: workingDirectory,
+      permission_mode: 'auto',
+      hook_event_name: 'Stop',
+      stop_hook_active: false,
+      last_assistant_message: '图片已经准备好了。'
+    });
+
+    expect(result).toEqual({
+      decision: 'block',
+      reason:
+        'If this turn should deliver the prepared artifacts, add exactly these delivery handoff lines on their own lines in your final answer before stopping:\n' +
+        '[[file:.deliveries/crop_左上.png]]\n' +
+        '[[file:.deliveries/crop_右上.png]]\n' +
+        'Do not invent, rewrite, inline, reorder, or quote the delivery handoff lines.'
+    });
+  });
+
+  it('infers a direct multi-file handoff batch when Claude forgot --multi but published several files together', async () => {
+    const workingDirectory = mkdtempSync(join(tmpdir(), 'file-return-stop-hook-multi-infer-'));
+    mkdirSync(join(workingDirectory, '.deliveries'), { recursive: true });
+    writeFileSync(join(workingDirectory, '.deliveries', 'part1_左上.png'), 'left-top');
+    writeFileSync(join(workingDirectory, '.deliveries', 'part2_右上.png'), 'right-top');
+    writeFileSync(join(workingDirectory, '.deliveries', 'part3_左下.png'), 'left-bottom');
+    writeFileSync(join(workingDirectory, '.deliveries', 'part4_右下.png'), 'right-bottom');
+    writeDeliveryManifest(workingDirectory, {
+      version: 1,
+      entries: [
+        {
+          kind: 'file',
+          path: 'part1_左上.png',
+          sourcePath: 'cropped/part1_top_left.png',
+          packaged: false
+        },
+        {
+          kind: 'file',
+          path: 'part2_右上.png',
+          sourcePath: 'cropped/part2_top_right.png',
+          packaged: false
+        },
+        {
+          kind: 'file',
+          path: 'part3_左下.png',
+          sourcePath: 'cropped/part3_bottom_left.png',
+          packaged: false
+        },
+        {
+          kind: 'file',
+          path: 'part4_右下.png',
+          sourcePath: 'cropped/part4_bottom_right.png',
+          packaged: false
+        }
+      ],
+      primary: 'part4_右下.png'
+    });
+
+    const result = await runFileReturnStopHook({
+      session_id: 'session-1',
+      transcript_path: join(workingDirectory, '.claude', 'transcript.jsonl'),
+      cwd: workingDirectory,
+      permission_mode: 'auto',
+      hook_event_name: 'Stop',
+      stop_hook_active: false,
+      last_assistant_message: '已经裁剪好了。'
+    });
+
+    expect(result).toEqual({
+      decision: 'block',
+      reason:
+        'If this turn should deliver the prepared artifacts, add exactly these delivery handoff lines on their own lines in your final answer before stopping:\n' +
+        '[[file:.deliveries/part1_左上.png]]\n' +
+        '[[file:.deliveries/part2_右上.png]]\n' +
+        '[[file:.deliveries/part3_左下.png]]\n' +
+        '[[file:.deliveries/part4_右下.png]]\n' +
+        'Do not invent, rewrite, inline, reorder, or quote the delivery handoff lines.'
     });
   });
 
@@ -846,7 +1002,55 @@ describe('file return skill scripts', () => {
     expect(withMarker).toEqual({});
     expect(alreadyActive).toEqual({
       decision: 'block',
-      reason: 'If this turn should deliver the prepared artifact, replace any other file marker with exactly [[file:.deliveries/cropped-image.png]] on its own line in your final answer before stopping. Do not use bare filenames or workspace-prefixed paths.'
+      reason:
+        'If this turn should deliver the prepared artifact, add exactly this delivery handoff line on its own line in your final answer before stopping:\n' +
+        '[[file:.deliveries/cropped-image.png]]\n' +
+        'Do not invent, rewrite, inline, reorder, or quote the delivery handoff lines.'
+    });
+  });
+
+  it('keeps blocking when only part of a multi-file handoff is present', async () => {
+    const workingDirectory = mkdtempSync(join(tmpdir(), 'file-return-stop-hook-multi-'));
+    mkdirSync(join(workingDirectory, '.deliveries'), { recursive: true });
+    writeFileSync(join(workingDirectory, '.deliveries', 'crop_左上.png'), 'left-top');
+    writeFileSync(join(workingDirectory, '.deliveries', 'crop_右上.png'), 'right-top');
+    writeDeliveryManifest(workingDirectory, {
+      version: 1,
+      entries: [
+        {
+          kind: 'file',
+          path: 'crop_左上.png',
+          sourcePath: 'crop_左上.png',
+          packaged: false
+        },
+        {
+          kind: 'file',
+          path: 'crop_右上.png',
+          sourcePath: 'crop_右上.png',
+          packaged: false
+        }
+      ],
+      primary: null,
+      handoff: ['crop_左上.png', 'crop_右上.png']
+    });
+
+    const result = await runFileReturnStopHook({
+      session_id: 'session-1',
+      transcript_path: join(workingDirectory, '.claude', 'transcript.jsonl'),
+      cwd: workingDirectory,
+      permission_mode: 'auto',
+      hook_event_name: 'Stop',
+      stop_hook_active: false,
+      last_assistant_message: '图片已经准备好了。\n[[file:.deliveries/crop_左上.png]]'
+    });
+
+    expect(result).toEqual({
+      decision: 'block',
+      reason:
+        'If this turn should deliver the prepared artifacts, add exactly these delivery handoff lines on their own lines in your final answer before stopping:\n' +
+        '[[file:.deliveries/crop_左上.png]]\n' +
+        '[[file:.deliveries/crop_右上.png]]\n' +
+        'Do not invent, rewrite, inline, reorder, or quote the delivery handoff lines.'
     });
   });
 });

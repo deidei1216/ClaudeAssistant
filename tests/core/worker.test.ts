@@ -556,6 +556,62 @@ describe('ClaudeCodeWorker', () => {
     ]);
   });
 
+  it('creates multiple outbound attachments when Claude emits multiple file markers', async () => {
+    const workingDirectory = mkdtempSync(join(tmpdir(), 'claude-worker-'));
+    tempDirectories.push(workingDirectory);
+    mkdirSync(join(workingDirectory, '.deliveries'), { recursive: true });
+    const leftPath = join(workingDirectory, '.deliveries', 'crop_左上.png');
+    const rightPath = join(workingDirectory, '.deliveries', 'crop_右上.png');
+    writeFileSync(leftPath, 'left bytes');
+    writeFileSync(rightPath, 'right bytes');
+
+    const runner = vi.fn().mockResolvedValue({
+      stdout: JSON.stringify({
+        type: 'result',
+        subtype: 'success',
+        is_error: false,
+        result: '已裁剪完成。\n[[file:.deliveries/crop_左上.png]]\n[[file:.deliveries/crop_右上.png]]',
+        session_id: 'attachment-session'
+      }),
+      stderr: '',
+      exitCode: 0
+    });
+    const worker = new ClaudeCodeWorker(runner);
+    const session: SessionProfile = {
+      id: 'attachment-session',
+      channelId: 'channel-outbound',
+      channelType: 'discord',
+      model: 'sonnet',
+      workingDirectory,
+      permissionMode: 'auto',
+      createdAt: new Date(),
+      lastActiveAt: new Date(),
+      status: 'active',
+      messageCount: 0
+    };
+
+    const response = await worker.execute(session, {
+      id: 'msg-outbound-multi',
+      channelId: 'channel-outbound',
+      channelType: 'discord',
+      userId: 'user-outbound',
+      content: '把两张裁剪图都发给我',
+      timestamp: new Date()
+    });
+
+    expect(response.content).toBe('已裁剪完成。');
+    expect(response.attachments).toEqual([
+      expect.objectContaining({
+        name: 'crop_左上.png',
+        localPath: leftPath
+      }),
+      expect.objectContaining({
+        name: 'crop_右上.png',
+        localPath: rightPath
+      })
+    ]);
+  });
+
   it('does not return deprecated recent file candidate metadata for arbitrary referenced workspace artifacts', async () => {
     const workingDirectory = mkdtempSync(join(tmpdir(), 'worker-artifacts-'));
     tempDirectories.push(workingDirectory);

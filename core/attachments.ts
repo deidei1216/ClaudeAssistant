@@ -134,6 +134,14 @@ export function extractFileMarkers(content: string): { content: string; markers:
   };
 }
 
+export function formatFileMarker(relativePath: string): string {
+  return `[[file:${relativePath}]]`;
+}
+
+export function formatFileMarkers(relativePaths: string[]): string[] {
+  return relativePaths.map((relativePath) => formatFileMarker(relativePath));
+}
+
 export function resolveOutboundAttachment(
   workingDirectory: string,
   relativePath: string

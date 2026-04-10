@@ -2,6 +2,7 @@ import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'nod
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
 import { spawn } from 'node:child_process';
+import { formatFileMarkers } from '../../core/attachments';
 import { buildSessionClaudeMd } from '../../core/session-claude-md';
 import { writeDeliveryManifest } from '../../skills/file-return/lib/delivery-manifest';
 
@@ -49,7 +50,7 @@ export function createFileReturnE2EFixture(rootDirectory: string): FileReturnE2E
 
   return {
     workingDirectory,
-    expectedMarkers: [`[[file:${relativePath}]]`],
+    expectedMarkers: formatFileMarkers([relativePath]),
     prompt: '把刚才那个文件直接发给我'
   };
 }
@@ -74,14 +75,15 @@ export function createMultiFileDirectReturnE2EFixture(rootDirectory: string): Fi
       sourcePath: fileName,
       packaged: false
     })),
-    primary: fileNames[fileNames.length - 1] ?? null
+    primary: null,
+    handoff: fileNames
   });
 
   return {
     workingDirectory,
-    expectedMarkers: fileNames.map((fileName) => `[[file:.deliveries/${fileName}]]`),
-    forbiddenSnippets: ['.zip', '[[file:.deliveries/4等份裁剪.zip]]'],
-    prompt: '把这 4 张已发布图片直接发给我，不要压缩包。为每张图片各输出一个 [[file:...]] marker，并且每个 marker 单独占一行。'
+    expectedMarkers: formatFileMarkers(fileNames.map((fileName) => `.deliveries/${fileName}`)),
+    forbiddenSnippets: ['.zip', ...formatFileMarkers(['.deliveries/4等份裁剪.zip'])],
+    prompt: '把这 4 张已发布图片直接发给我，不要压缩包。按 Stop hook 给出的交付 handoff line 原样返回，每个 handoff line 单独占一行。'
   };
 }
 
@@ -132,7 +134,7 @@ function runClaudePrint(
         '--tools',
         '',
         '--append-system-prompt',
-        'Treat the current working directory as an isolated workspace for this validation. Use only files inside the current working directory. If a Stop hook asks you to add a [[file:...]] marker, comply exactly and do not quote file contents.',
+        'Treat the current working directory as an isolated workspace for this validation. Use only files inside the current working directory. If a Stop hook gives you a delivery handoff line, copy it exactly on its own line and do not quote file contents.',
         prompt
       ],
       {

@@ -26,7 +26,7 @@ export async function packageDelivery(
   if (!publishedEntry) {
     throw new Error(
       'package-delivery only accepts a published delivery entry from .deliveries. ' +
-      'If you need to send a small set of standalone files, publish each file and return multiple [[file:...]] markers instead of creating a zip. ' +
+      'If you need to send a small set of standalone files, publish each file separately instead of creating a zip. ' +
       'If you do need an archive, first publish a directory with publish-dir and then pass that published directory name to package-delivery.'
     );
   }
@@ -57,7 +57,10 @@ export async function packageDelivery(
       sourcePath,
       packaged: true
     },
-    { primary: true }
+    {
+      primary: true,
+      handoff: { mode: 'clear' }
+    }
   );
 
   return {

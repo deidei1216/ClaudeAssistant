@@ -51,6 +51,42 @@ describe('loadGatewayConfig', () => {
       expect(config.limits.maxTriggersPerSession).toBe(50);
       expect(config.logging.level).toBe('info');
       expect(config.logging.file).toBe('logs/gateway.log');
+      expect(config.aggregation.quietWindowMs).toBe(5000);
+      expect(config.aggregation.maxWindowMs).toBe(30000);
+    } finally {
+      await rm(tempDir, { recursive: true, force: true });
+    }
+  });
+
+  test('loads custom aggregation timing when configured', async () => {
+    const tempDir = await mkdtemp(join(tmpdir(), 'gateway-config-'));
+    const configDir = join(tempDir, 'config');
+    const configPath = join(configDir, 'gateway.json');
+
+    try {
+      await mkdir(configDir, { recursive: true });
+      await writeFile(
+        configPath,
+        JSON.stringify(
+          {
+            enabledAdapters: ['weixin'],
+            aggregation: {
+              quietWindowMs: 3000,
+              maxWindowMs: 12000
+            }
+          },
+          null,
+          2
+        ),
+        'utf8'
+      );
+
+      const config = loadGatewayConfig(configPath);
+
+      expect(config.aggregation).toEqual({
+        quietWindowMs: 3000,
+        maxWindowMs: 12000
+      });
     } finally {
       await rm(tempDir, { recursive: true, force: true });
     }

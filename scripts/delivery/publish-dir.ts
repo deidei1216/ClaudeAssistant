@@ -31,7 +31,10 @@ export function publishDir(options: PublishDirOptions): { publishedPath: string 
       sourcePath,
       packaged: false
     },
-    { primary: options.primary ?? false }
+    {
+      primary: options.primary ?? false,
+      handoff: { mode: 'clear' }
+    }
   );
 
   return {

@@ -1,5 +1,5 @@
 import { createCipheriv } from 'node:crypto';
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { afterEach, describe, expect, it, vi } from 'vitest';
@@ -17,6 +17,7 @@ describe('WeixinAdapter', () => {
 
   afterEach(() => {
     vi.restoreAllMocks();
+    vi.useRealTimers();
 
     while (tempDirectories.length > 0) {
       const directory = tempDirectories.pop();
@@ -238,6 +239,109 @@ describe('WeixinAdapter', () => {
       }
     });
 
+    await adapter.disconnect();
+  });
+
+  it('keeps polling later inbound messages while an earlier callback is still running', async () => {
+    let getUpdatesCalls = 0;
+    let resolveFirstCallback: (() => void) | undefined;
+
+    const fetchMock = vi.fn(async (input: URL | string, init?: RequestInit) => {
+      const url = String(input);
+
+      if (url.endsWith('/ilink/bot/getupdates')) {
+        getUpdatesCalls += 1;
+
+        if (getUpdatesCalls === 1) {
+          return {
+            ok: true,
+            status: 200,
+            text: async () =>
+              JSON.stringify({
+                ret: 0,
+                msgs: [
+                  {
+                    message_id: 301,
+                    from_user_id: 'user-3@im.wechat',
+                    to_user_id: 'bot-1@im.wechat',
+                    create_time_ms: Date.parse('2026-04-09T12:02:00.000Z'),
+                    context_token: 'ctx-301',
+                    message_type: 1,
+                    item_list: [{ type: 1, text_item: { text: '第一条' } }]
+                  }
+                ],
+                get_updates_buf: 'cursor-301'
+              })
+          } as Response;
+        }
+
+        if (getUpdatesCalls === 2) {
+          return {
+            ok: true,
+            status: 200,
+            text: async () =>
+              JSON.stringify({
+                ret: 0,
+                msgs: [
+                  {
+                    message_id: 302,
+                    from_user_id: 'user-3@im.wechat',
+                    to_user_id: 'bot-1@im.wechat',
+                    create_time_ms: Date.parse('2026-04-09T12:02:03.000Z'),
+                    context_token: 'ctx-302',
+                    message_type: 1,
+                    item_list: [{ type: 1, text_item: { text: '第二条' } }]
+                  }
+                ],
+                get_updates_buf: 'cursor-302'
+              })
+          } as Response;
+        }
+
+        return new Promise<Response>((_, reject) => {
+          init?.signal?.addEventListener(
+            'abort',
+            () => {
+              reject(createAbortError());
+            },
+            { once: true }
+          );
+        });
+      }
+
+      throw new Error(`Unexpected request: ${url}`);
+    });
+
+    const adapter = new WeixinAdapter(fetchMock as never);
+    const inboundMessages: string[] = [];
+
+    await adapter.initialize({
+      enabled: true,
+      accounts: [
+        {
+          id: 'acct-1',
+          token: 'token-1',
+          ilinkUserId: 'bot-1@im.wechat'
+        }
+      ]
+    });
+
+    adapter.onMessage(async (message) => {
+      inboundMessages.push(message.content);
+
+      if (message.content === '第一条') {
+        await new Promise<void>((resolve) => {
+          resolveFirstCallback = resolve;
+        });
+      }
+    });
+
+    await adapter.connect();
+    await vi.waitFor(() => {
+      expect(inboundMessages).toEqual(['第一条', '第二条']);
+    });
+
+    resolveFirstCallback?.();
     await adapter.disconnect();
   });
 
@@ -1109,5 +1213,311 @@ describe('WeixinAdapter', () => {
     expect(readFileSync(inboundMessages[0].attachment ?? '')).toEqual(pngBytes);
 
     await adapter.disconnect();
+  });
+
+  it('recovers a stale account lock when the recorded pid is no longer running', async () => {
+    const tempRoot = mkdtempSync(join(tmpdir(), 'weixin-adapter-lock-'));
+    tempDirectories.push(tempRoot);
+    const lockDirectory = join(tempRoot, 'locks');
+    const lockPath = join(lockDirectory, 'acct-1.lock');
+    mkdirSync(lockDirectory, { recursive: true });
+    writeFileSync(
+      lockPath,
+      JSON.stringify(
+        {
+          pid: 424242,
+          accountId: 'acct-1',
+          acquiredAt: '2026-04-10T00:00:00.000Z'
+        },
+        null,
+        2
+      )
+    );
+
+    const processKillSpy = vi.spyOn(process, 'kill').mockImplementation(((pid: number) => {
+      if (pid === 424242) {
+        const error = new Error('No such process') as NodeJS.ErrnoException;
+        error.code = 'ESRCH';
+        throw error;
+      }
+
+      return true;
+    }) as typeof process.kill);
+
+    const logger = {
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn()
+    };
+    const fetchMock = vi.fn(async (input: URL | string, init?: RequestInit) => {
+      const url = String(input);
+
+      if (url.endsWith('/ilink/bot/getupdates')) {
+        return new Promise<Response>((_, reject) => {
+          init?.signal?.addEventListener(
+            'abort',
+            () => reject(createAbortError()),
+            { once: true }
+          );
+        });
+      }
+
+      throw new Error(`Unexpected request: ${url}`);
+    });
+
+    const adapter = new WeixinAdapter(fetchMock as never, logger);
+    await adapter.initialize({
+      enabled: true,
+      lockDirectory,
+      accounts: [
+        {
+          id: 'acct-1',
+          token: 'token-1',
+          ilinkUserId: 'bot-1@im.wechat'
+        }
+      ]
+    });
+    adapter.onMessage(async () => undefined);
+
+    await adapter.connect();
+
+    await vi.waitFor(() => {
+      expect(fetchMock).toHaveBeenCalled();
+    });
+    expect(processKillSpy).toHaveBeenCalledWith(424242, 0);
+    expect(JSON.parse(readFileSync(lockPath, 'utf8'))).toEqual({
+      pid: process.pid,
+      accountId: 'acct-1',
+      acquiredAt: expect.any(String)
+    });
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        accountId: 'acct-1',
+        lockPath,
+        reason: 'Lock owner pid 424242 is no longer running'
+      }),
+      'Recovered stale Weixin account lock'
+    );
+
+    await adapter.disconnect();
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  it('keeps an active account lock owned by another live process', async () => {
+    const tempRoot = mkdtempSync(join(tmpdir(), 'weixin-adapter-lock-'));
+    tempDirectories.push(tempRoot);
+    const lockDirectory = join(tempRoot, 'locks');
+    const lockPath = join(lockDirectory, 'acct-1.lock');
+    mkdirSync(lockDirectory, { recursive: true });
+    writeFileSync(
+      lockPath,
+      JSON.stringify(
+        {
+          pid: 515151,
+          accountId: 'acct-1',
+          acquiredAt: '2026-04-10T00:00:00.000Z'
+        },
+        null,
+        2
+      )
+    );
+
+    const processKillSpy = vi.spyOn(process, 'kill').mockImplementation(((pid: number) => {
+      if (pid === 515151) {
+        return true;
+      }
+
+      return true;
+    }) as typeof process.kill);
+
+    const logger = {
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn()
+    };
+    const fetchMock = vi.fn();
+
+    const adapter = new WeixinAdapter(fetchMock as never, logger);
+    await adapter.initialize({
+      enabled: true,
+      lockDirectory,
+      accounts: [
+        {
+          id: 'acct-1',
+          token: 'token-1',
+          ilinkUserId: 'bot-1@im.wechat'
+        }
+      ]
+    });
+    adapter.onMessage(async () => undefined);
+
+    await adapter.connect();
+
+    expect(processKillSpy).toHaveBeenCalledWith(515151, 0);
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(JSON.parse(readFileSync(lockPath, 'utf8'))).toEqual({
+      pid: 515151,
+      accountId: 'acct-1',
+      acquiredAt: '2026-04-10T00:00:00.000Z'
+    });
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        accountId: 'acct-1',
+        lockPath
+      }),
+      'Waiting for Weixin account lock held by another gateway instance'
+    );
+
+    await adapter.disconnect();
+    expect(existsSync(lockPath)).toBe(true);
+  });
+
+  it('retries account lock acquisition until a live lock becomes stale', async () => {
+    vi.useFakeTimers();
+
+    const tempRoot = mkdtempSync(join(tmpdir(), 'weixin-adapter-lock-'));
+    tempDirectories.push(tempRoot);
+    const lockDirectory = join(tempRoot, 'locks');
+    const lockPath = join(lockDirectory, 'acct-1.lock');
+    mkdirSync(lockDirectory, { recursive: true });
+    writeFileSync(
+      lockPath,
+      JSON.stringify(
+        {
+          pid: 616161,
+          accountId: 'acct-1',
+          acquiredAt: '2026-04-10T00:00:00.000Z'
+        },
+        null,
+        2
+      )
+    );
+
+    let lockOwnerAlive = true;
+    const processKillSpy = vi.spyOn(process, 'kill').mockImplementation(((pid: number) => {
+      if (pid === 616161) {
+        if (lockOwnerAlive) {
+          return true;
+        }
+
+        const error = new Error('No such process') as NodeJS.ErrnoException;
+        error.code = 'ESRCH';
+        throw error;
+      }
+
+      return true;
+    }) as typeof process.kill);
+
+    const logger = {
+      info: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn()
+    };
+    const fetchMock = vi.fn(async (input: URL | string, init?: RequestInit) => {
+      const url = String(input);
+
+      if (url.endsWith('/ilink/bot/getupdates')) {
+        return new Promise<Response>((_, reject) => {
+          init?.signal?.addEventListener(
+            'abort',
+            () => reject(createAbortError()),
+            { once: true }
+          );
+        });
+      }
+
+      throw new Error(`Unexpected request: ${url}`);
+    });
+
+    const adapter = new WeixinAdapter(fetchMock as never, logger);
+    await adapter.initialize({
+      enabled: true,
+      lockDirectory,
+      retryDelayMs: 50,
+      accounts: [
+        {
+          id: 'acct-1',
+          token: 'token-1',
+          ilinkUserId: 'bot-1@im.wechat'
+        }
+      ]
+    });
+    adapter.onMessage(async () => undefined);
+
+    await adapter.connect();
+
+    expect(processKillSpy).toHaveBeenCalledWith(616161, 0);
+    expect(fetchMock).not.toHaveBeenCalled();
+
+    lockOwnerAlive = false;
+    await vi.advanceTimersByTimeAsync(50);
+
+    await vi.waitFor(() => {
+      expect(fetchMock).toHaveBeenCalled();
+    });
+    expect(JSON.parse(readFileSync(lockPath, 'utf8'))).toEqual({
+      pid: process.pid,
+      accountId: 'acct-1',
+      acquiredAt: expect.any(String)
+    });
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        accountId: 'acct-1',
+        lockPath
+      }),
+      'Waiting for Weixin account lock held by another gateway instance'
+    );
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.objectContaining({
+        accountId: 'acct-1',
+        lockPath
+      }),
+      'Acquired Weixin account lock after waiting'
+    );
+
+    await adapter.disconnect();
+    expect(existsSync(lockPath)).toBe(false);
+  });
+
+  it('keeps the process alive with a maintenance timer and clears it on disconnect', async () => {
+    vi.useFakeTimers();
+
+    const fetchMock = vi.fn(async (input: URL | string, init?: RequestInit) => {
+      const url = String(input);
+
+      if (url.endsWith('/ilink/bot/getupdates')) {
+        return new Promise<Response>((_, reject) => {
+          init?.signal?.addEventListener(
+            'abort',
+            () => reject(createAbortError()),
+            { once: true }
+          );
+        });
+      }
+
+      throw new Error(`Unexpected request: ${url}`);
+    });
+
+    const adapter = new WeixinAdapter(fetchMock as never);
+    await adapter.initialize({
+      enabled: true,
+      accounts: [
+        {
+          id: 'acct-1',
+          token: 'token-1',
+          ilinkUserId: 'bot-1@im.wechat'
+        }
+      ]
+    });
+    adapter.onMessage(async () => undefined);
+
+    await adapter.connect();
+
+    const timerCountBefore = vi.getTimerCount();
+    expect(timerCountBefore).toBeGreaterThan(0);
+
+    await adapter.disconnect();
+
+    expect(vi.getTimerCount()).toBe(0);
   });
 });

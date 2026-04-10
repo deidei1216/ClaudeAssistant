@@ -26,6 +26,8 @@ describe('AgentGateway', () => {
   const tempDirectories: string[] = [];
 
   afterEach(() => {
+    vi.useRealTimers();
+
     while (tempDirectories.length > 0) {
       const directory = tempDirectories.pop();
       if (directory) {
@@ -112,6 +114,242 @@ describe('AgentGateway', () => {
     expect(adapter.type).toBe('discord');
     expect(typeof adapter.sendMessage).toBe('function');
     expect('onControlInput' in adapter).toBe(false);
+  });
+
+  it('coalesces nearby text and attachment messages before executing Claude', async () => {
+    vi.useFakeTimers();
+
+    const sessionRoot = mkdtempSync(join(tmpdir(), 'gateway-coalesce-'));
+    const workingDirectory = join(sessionRoot, 'workspace');
+    mkdirSync(workingDirectory, { recursive: true });
+    mkdirSync(join(sessionRoot, 'uploads'), { recursive: true });
+    tempDirectories.push(sessionRoot);
+
+    const attachmentPath = join(sessionRoot, 'uploads', 'att-1-photo.png');
+    writeFileSync(attachmentPath, 'png bytes');
+
+    const adapter = createAdapter();
+    const commandHandler = {
+      executeFromMessage: vi.fn()
+    };
+    const session = createSession({ workingDirectory });
+    const orchestrator = {
+      getOrCreateSession: vi.fn().mockReturnValue(session),
+      execute: vi.fn().mockResolvedValue({ content: 'Claude response', replyTo: 'msg-2' })
+    };
+    const gateway = new AgentGateway({
+      adapters: [adapter],
+      commandHandler: commandHandler as unknown as CommandHandler,
+      orchestrator: orchestrator as GatewayOrchestrator,
+      logger: { info: vi.fn(), error: vi.fn() }
+    });
+
+    await gateway.start();
+    const onMessage = adapter.onMessage.mock.calls[0]?.[0] as ((message: AgentMessage) => Promise<void>) | undefined;
+
+    const firstPromise = onMessage?.(createMessage('裁剪成 4 份', {
+      id: 'msg-1',
+      channelType: 'weixin',
+      channelId: 'channel-1',
+      userId: 'user-1',
+      timestamp: new Date('2026-04-10T00:00:00.000Z')
+    }));
+    await vi.advanceTimersByTimeAsync(3000);
+    const secondPromise = onMessage?.(createMessage('', {
+      id: 'msg-2',
+      channelType: 'weixin',
+      channelId: 'channel-1',
+      userId: 'user-1',
+      attachments: [
+        {
+          id: 'att-1',
+          name: 'photo.png',
+          type: 'image/png',
+          size: 8,
+          url: attachmentPath,
+          localPath: attachmentPath
+        }
+      ],
+      timestamp: new Date('2026-04-10T00:00:01.000Z')
+    }));
+
+    await vi.advanceTimersByTimeAsync(5200);
+    await Promise.all([firstPromise, secondPromise]);
+
+    expect(orchestrator.execute).toHaveBeenCalledTimes(1);
+    expect(orchestrator.execute).toHaveBeenCalledWith(
+      'session-1',
+      expect.objectContaining({
+        id: 'msg-2',
+        content: '裁剪成 4 份',
+        attachments: [
+          expect.objectContaining({
+            name: 'photo.png'
+          })
+        ],
+        metadata: expect.objectContaining({
+          coalescedCount: 2,
+          coalescedMessageIds: ['msg-1', 'msg-2']
+        })
+      })
+    );
+  });
+
+  it('flushes a busy turn at the max window even if new messages keep arriving', async () => {
+    vi.useFakeTimers();
+
+    const adapter = createAdapter();
+    const commandHandler = {
+      executeFromMessage: vi.fn()
+    };
+    const session = createSession();
+    const orchestrator = {
+      getOrCreateSession: vi.fn().mockReturnValue(session),
+      execute: vi.fn().mockResolvedValue({ content: 'Claude response', replyTo: 'msg-4' })
+    };
+    const gateway = new AgentGateway({
+      adapters: [adapter],
+      commandHandler: commandHandler as unknown as CommandHandler,
+      orchestrator: orchestrator as GatewayOrchestrator,
+      aggregation: {
+        quietWindowMs: 5000,
+        maxWindowMs: 12000
+      },
+      logger: { info: vi.fn(), error: vi.fn() }
+    });
+
+    await gateway.start();
+    const onMessage = adapter.onMessage.mock.calls[0]?.[0] as ((message: AgentMessage) => Promise<void>) | undefined;
+
+    const firstPromise = onMessage?.(createMessage('第一句', {
+      id: 'msg-1',
+      channelType: 'weixin',
+      channelId: 'channel-1',
+      userId: 'user-1',
+      timestamp: new Date('2026-04-10T00:00:00.000Z')
+    }));
+    await vi.advanceTimersByTimeAsync(4000);
+    const secondPromise = onMessage?.(createMessage('第二句', {
+      id: 'msg-2',
+      channelType: 'weixin',
+      channelId: 'channel-1',
+      userId: 'user-1',
+      timestamp: new Date('2026-04-10T00:00:04.000Z')
+    }));
+    await vi.advanceTimersByTimeAsync(4000);
+    const thirdPromise = onMessage?.(createMessage('第三句', {
+      id: 'msg-3',
+      channelType: 'weixin',
+      channelId: 'channel-1',
+      userId: 'user-1',
+      timestamp: new Date('2026-04-10T00:00:08.000Z')
+    }));
+
+    await vi.advanceTimersByTimeAsync(4500);
+    expect(orchestrator.execute).toHaveBeenCalledTimes(1);
+
+    await Promise.all([firstPromise, secondPromise, thirdPromise]);
+
+    expect(orchestrator.execute.mock.calls[0]?.[1]).toEqual(
+      expect.objectContaining({
+        id: 'msg-3',
+        content: '第一句\n\n第二句\n\n第三句',
+        metadata: expect.objectContaining({
+          coalescedCount: 3,
+          coalescedMessageIds: ['msg-1', 'msg-2', 'msg-3']
+        })
+      })
+    );
+  });
+
+  it('starts a new turn after the previous turn has already flushed', async () => {
+    vi.useFakeTimers();
+
+    const sessionRoot = mkdtempSync(join(tmpdir(), 'gateway-coalesce-'));
+    const workingDirectory = join(sessionRoot, 'workspace');
+    mkdirSync(workingDirectory, { recursive: true });
+    mkdirSync(join(sessionRoot, 'uploads'), { recursive: true });
+    tempDirectories.push(sessionRoot);
+
+    const attachmentPath = join(sessionRoot, 'uploads', 'att-2-photo.png');
+    writeFileSync(attachmentPath, 'png bytes');
+
+    const adapter = createAdapter();
+    const commandHandler = {
+      executeFromMessage: vi.fn()
+    };
+    const session = createSession({ workingDirectory });
+    const orchestrator = {
+      getOrCreateSession: vi.fn().mockReturnValue(session),
+      execute: vi.fn().mockResolvedValue({ content: 'Claude response', replyTo: 'msg-2' })
+    };
+    const gateway = new AgentGateway({
+      adapters: [adapter],
+      commandHandler: commandHandler as unknown as CommandHandler,
+      orchestrator: orchestrator as GatewayOrchestrator,
+      aggregation: {
+        quietWindowMs: 5000,
+        maxWindowMs: 12000
+      },
+      logger: { info: vi.fn(), error: vi.fn() }
+    });
+
+    await gateway.start();
+    const onMessage = adapter.onMessage.mock.calls[0]?.[0] as ((message: AgentMessage) => Promise<void>) | undefined;
+
+    const textPromise = onMessage?.(createMessage('识别下内容', {
+      id: 'msg-1',
+      channelType: 'weixin',
+      channelId: 'channel-1',
+      userId: 'user-1',
+      timestamp: new Date('2026-04-10T00:00:00.000Z')
+    }));
+    await vi.advanceTimersByTimeAsync(5200);
+    await textPromise;
+
+    const attachmentPromise = onMessage?.(createMessage('', {
+      id: 'msg-2',
+      channelType: 'weixin',
+      channelId: 'channel-1',
+      userId: 'user-1',
+      attachments: [
+        {
+          id: 'att-2',
+          name: 'photo.png',
+          type: 'image/png',
+          size: 8,
+          url: attachmentPath,
+          localPath: attachmentPath
+        }
+      ],
+      timestamp: new Date('2026-04-10T00:00:20.000Z')
+    }));
+    await vi.advanceTimersByTimeAsync(5200);
+    await attachmentPromise;
+
+    expect(orchestrator.execute).toHaveBeenCalledTimes(2);
+    expect(orchestrator.execute.mock.calls[0]?.[1]).toEqual(
+      expect.objectContaining({
+        id: 'msg-1',
+        content: '识别下内容',
+        attachments: undefined
+      })
+    );
+    expect(orchestrator.execute.mock.calls[1]?.[1]).toEqual(
+      expect.objectContaining({
+        id: 'msg-2',
+        content: '',
+        attachments: [
+          expect.objectContaining({
+            name: 'photo.png'
+          })
+        ],
+        metadata: expect.objectContaining({
+          coalescedCount: 1,
+          coalescedMessageIds: ['msg-2']
+        })
+      })
+    );
   });
 
   it('sends command response to the adapter', async () => {
@@ -900,6 +1138,8 @@ describe('AgentGateway', () => {
   });
 
   it('logs the full error payload and sends a fallback message when handling fails', async () => {
+    vi.useFakeTimers();
+
     const onMessage = vi.fn();
     const adapter = createAdapter({ onMessage });
     const commandHandler = {
@@ -926,8 +1166,9 @@ describe('AgentGateway', () => {
     const callback = onMessage.mock.calls[0]?.[0] as ((message: AgentMessage) => Promise<void>) | undefined;
     const message = createMessage('hello world');
 
-    await callback?.(message);
-    await new Promise((resolve) => setTimeout(resolve, 0));
+    const pending = callback?.(message);
+    await vi.advanceTimersByTimeAsync(5200);
+    await pending;
 
     expect(logger.error).toHaveBeenCalledWith(
       expect.objectContaining({

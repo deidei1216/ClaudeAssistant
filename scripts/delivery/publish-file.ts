@@ -9,6 +9,7 @@ interface PublishFileOptions {
   source: string;
   displayName?: string;
   primary?: boolean;
+  multi?: boolean;
 }
 
 export function publishFile(options: PublishFileOptions): { publishedPath: string } {
@@ -32,7 +33,15 @@ export function publishFile(options: PublishFileOptions): { publishedPath: strin
       sourcePath,
       packaged: false
     },
-    { primary: options.primary ?? true }
+    options.multi
+      ? {
+          primary: null,
+          handoff: { mode: 'append', paths: [fileName] }
+        }
+      : {
+          primary: options.primary ?? true,
+          handoff: { mode: 'clear' }
+        }
   );
 
   return {
@@ -49,12 +58,18 @@ function parseArgs(argv: string[]): PublishFileOptions {
 
   const displayName = isCliFlag(maybeDisplayName) ? undefined : maybeDisplayName;
   const flags = isCliFlag(maybeDisplayName) ? [maybeDisplayName, ...rest] : rest;
+  const multi = flags.includes('--multi');
+
+  if (multi && (flags.includes('--primary') || flags.includes('--no-primary'))) {
+    throw new Error('Usage: --multi cannot be combined with --primary or --no-primary');
+  }
 
   return {
     cwd: process.cwd(),
     source,
     displayName,
-    primary: parsePrimaryFlag(flags, true)
+    primary: parsePrimaryFlag(flags, true),
+    multi
   };
 }
 

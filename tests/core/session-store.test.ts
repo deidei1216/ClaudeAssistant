@@ -64,14 +64,14 @@ describe('SessionStore', () => {
     expect(contract).toContain('publish-file.ts" <source> [displayName]');
     expect(contract).toContain('publish-dir.ts" <sourceDir> [name]');
     expect(contract).toContain('package-delivery.ts" <sourcePath> [outputName]');
-    expect(contract).toContain('If a published primary delivery is a directory, the Stop hook may package it into an archive before asking for the final [[file:...]] marker.');
+    expect(contract).toContain('If a published primary delivery is a directory, the Stop hook may package it into an archive before the final delivery handoff.');
     expect(contract).toContain('If a task should return files, call a publish script before your final answer. Use package-delivery when you need to choose the archive contents explicitly.');
-    expect(contract).toContain('For a small set of standalone files that can be viewed directly in chat, publish each file separately and return multiple [[file:...]] markers, one per line.');
+    expect(contract).toContain('For a small set of standalone files that can be viewed directly in chat, publish each file separately with');
+    expect(contract).toContain('and add --multi for each file instead of creating a zip.');
     expect(contract).toContain('Do not create or mention a zip archive when direct file attachments are practical, unless the user explicitly asks for an archive.');
     expect(contract).toContain('package-delivery only accepts a previously published entry from workspace/.deliveries/, usually a directory published with publish-dir.');
-    expect(contract).toContain('When returning a published file, your final answer must include the exact published path under .deliveries/, for example [[file:.deliveries/example.png]].');
-    expect(contract).toContain('Do not use bare filenames like [[file:example.png]] or workspace-prefixed paths like [[file:workspace/.deliveries/example.png]].');
-    expect(contract).toContain('If the Stop hook gives you an exact [[file:...]] marker to use, copy that marker verbatim and replace any incorrect file marker with it.');
+    expect(contract).toContain('You do not need to invent attachment marker syntax yourself.');
+    expect(contract).toContain('If the Stop hook gives you an exact delivery handoff line to use, copy that handoff line verbatim and replace any incorrect one with it.');
     expect(contract).toContain('Do not return files directly from uploads/, the session root, or arbitrary workspace paths.');
   });
 

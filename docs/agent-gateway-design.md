@@ -182,7 +182,223 @@ interface MessageResult {
 }
 ```
 
-### 3.4 Session Profile（会话配置）
+### 3.4 入站回合聚合（Inbound Turn Aggregation）
+
+> 这部分描述的是统一消息入口的设计原则，不是某个渠道的临时补丁。
+
+#### 3.4.1 背景
+
+在真实聊天渠道里，用户的一次意图不一定以“一条完整消息”到达系统。
+
+- 文本和图片可能被拆成两条独立消息
+- 附件上传通常比纯文本慢
+- 不同渠道的 SDK 或长轮询接口可能按不同顺序交付消息
+- 如果 Gateway 在第一条消息到达时就立刻调用 Claude Code，模型看到的上下文可能是不完整的
+
+典型表现是：
+
+- 先收到文本，Claude 先回答文本
+- 几秒后才收到图片，Claude 再补做第二轮
+- 最终结果虽然可能正确，但交互体验不接近原生 Claude 的“图文一起提交”
+
+因此，Gateway 需要承担一个统一职责：
+
+**先把同一轮用户意图尽量聚合，再调用一次 Claude。**
+
+#### 3.4.2 为什么放在 Gateway 层
+
+这项能力放在 Gateway，而不是分散在每个 Adapter，原因是：
+
+1. 它解决的是“统一入口的消息时序问题”，不是某个渠道专属业务。
+2. 渠道适配器的职责应该是“尽快、尽原始地上报消息”，而不是自行决定如何拼接用户意图。
+3. 如果每个渠道各写一套文本/附件重排逻辑，后续很难保证行为一致。
+4. Claude Code 的调用时机属于编排层决策，天然应由 Gateway 控制。
+
+对应的分层边界是：
+
+- **Adapter**：负责把原始消息尽快变成 `AgentMessage`
+- **Gateway**：负责聚合、排队、调用 Claude
+- **Orchestrator / Worker**：负责会话执行，不关心这一轮消息是如何被聚合出来的
+
+#### 3.4.3 Turn 的定义
+
+Gateway 不再把每条入站消息直接视为一次 Claude 调用，而是先把它们归入一个 turn。
+
+当前 turn 的主键是：
+
+```typescript
+turnKey = `${channelType}:${channelId}:${userId}`
+```
+
+含义：
+
+- 同一频道
+- 同一用户
+- 在一个尚未 flush 的缓冲窗口内
+
+都会被视为“同一轮用户输入”。
+
+这样设计有两个直接收益：
+
+1. 同一用户连续发文本、图片、补充说明时，可以被合并到同一轮。
+2. 不同用户在同一频道发消息时，不会互相污染 turn。
+
+#### 3.4.4 时序模型
+
+每个 turn 同时维护两个计时器：
+
+- `quietWindowMs`
+- `maxWindowMs`
+
+语义如下：
+
+- `quietWindowMs`：从“最后一条消息进入 turn”开始计时，只要安静满这个时间，就立即 flush。
+- `maxWindowMs`：从“turn 第一条消息进入”开始计时，无论期间是否持续有新消息，达到上限必须 flush。
+
+默认配置：
+
+```json
+{
+  "aggregation": {
+    "quietWindowMs": 5000,
+    "maxWindowMs": 30000
+  }
+}
+```
+
+它们解决的是两个不同问题：
+
+- `quietWindowMs` 解决“给文本和附件一点时间汇合”
+- `maxWindowMs` 解决“不能为了等后续消息而无限阻塞”
+
+因此实际优先级是：
+
+1. 如果 turn 安静了 `quietWindowMs`，立刻调用 Claude
+2. 如果 turn 一直有新消息，直到超过 `maxWindowMs`，强制调用 Claude
+
+#### 3.4.5 为什么不是固定等待 30 秒
+
+这里故意没有采用“每条消息固定等 30 秒再发”的策略。
+
+原因是那样会带来明显的首响延迟，而且会把大多数普通纯文本消息都拖慢。
+
+`quiet window + max window` 的组合，本质上是在两件事之间做平衡：
+
+- 尽量把同一轮图文聚齐
+- 尽量避免不必要的等待
+
+所以在正常场景里，大多数普通消息只会多等待一个较短的安静窗口，而不是每次都等到最大上限。
+
+#### 3.4.6 Flush 后的消息如何处理
+
+一旦 turn 被 flush，Claude 调用就已经开始。
+
+此时后续再到达的新消息，不会再被塞回已经发出的那次调用里，而是会进入下一个 turn。
+
+这是一个刻意保留的约束：
+
+- Gateway 可以控制“调用前聚合”
+- 但不会试图做“调用后撤回并重组”
+
+这样可以保证实现简单、行为稳定，也不会把 Claude 会话状态机变得过于复杂。
+
+#### 3.4.7 消息合并规则
+
+同一 turn 内的原始消息会按 `timestamp` 排序后再合并。
+
+合并结果遵循以下规则：
+
+- 文本内容按时间顺序拼接
+- 附件按时间顺序展开
+- 最后一条消息的基础元数据作为主消息壳
+- `metadata.coalescedMessageIds` 记录被合并的原始消息 ID
+- `metadata.coalescedCount` 记录本轮合并的消息数
+
+这样做的目标不是“保留原始渠道格式”，而是给 Claude 一个更完整、更接近用户真实输入顺序的统一 prompt。
+
+#### 3.4.8 命令消息为什么直通
+
+像 `/new`、`/status` 这类命令不参与 turn 聚合，而是直接执行。
+
+理由是：
+
+- 命令语义明确，不依赖后续附件补全
+- 用户对命令的预期是即时响应
+- 命令若被延迟聚合，会让控制面和对话面混在一起
+
+因此命令消息会：
+
+1. 先清掉同频道尚未 flush 的 turn
+2. 再直接进入命令执行路径
+
+#### 3.4.9 与频道串行队列的关系
+
+Gateway 还有一层频道串行队列，用来保证同一频道不会并发执行多个 Claude 调用。
+
+两者职责不同：
+
+- **Turn Aggregation**：决定“哪些消息应合并成一次调用”
+- **Channel Queue**：决定“这些调用按什么顺序执行”
+
+这两个机制叠加后，可以同时满足：
+
+- 同一轮消息尽量一次性进入 Claude
+- 同一频道内的多轮请求保持顺序一致
+
+#### 3.4.10 适配器为什么仍然要求“尽快上报”
+
+虽然聚合逻辑放在 Gateway，但 Adapter 仍然必须遵守一个关键约束：
+
+**不能等待 Gateway 完成整轮处理后，才继续读取后续入站消息。**
+
+原因很简单：
+
+- Gateway 的窗口是“为消息汇合创造机会”
+- 如果 Adapter 自己把后续消息阻塞住，Gateway 再长的窗口也没有意义
+
+因此当前设计要求 Adapter：
+
+- 尽快拉取消息
+- 尽快完成附件提取
+- 尽快异步投递到 Gateway
+- 不把 Gateway 回调当作轮询循环的阻塞点
+
+这不是把聚合逻辑下放到 Adapter，而是保证 Gateway 真的有机会看到完整的入站序列。
+
+#### 3.4.11 这套设计解决什么，不解决什么
+
+它主要解决：
+
+- 文本和附件存在轻微到中度抖动时，避免拆成两轮 Claude 调用
+- 不同渠道共享同一套统一消息聚合策略
+- 在不显著放大延迟的前提下，提升图文混合输入的一致性
+
+它不解决：
+
+- 渠道上游长时间不交付附件
+- 已经发出的 Claude 调用被“回滚重做”
+- 跨用户、跨频道的意图合并
+
+换句话说，Gateway 聚合解决的是“编排层的时序问题”，不是“渠道基础设施的全部不确定性”。
+
+#### 3.4.12 当前实现映射
+
+当前代码中的主要落点如下：
+
+- [core/gateway.ts](/Users/zhoudi/Projects/GitHub/ClaudeAssistant-migrate-weixin/core/gateway.ts)
+  turn 建模、`quietWindowMs`、`maxWindowMs`、flush 和消息合并逻辑
+- [config/gateway-config.ts](/Users/zhoudi/Projects/GitHub/ClaudeAssistant-migrate-weixin/config/gateway-config.ts)
+  聚合配置解析
+- [settings.json](/Users/zhoudi/Projects/GitHub/ClaudeAssistant-migrate-weixin/settings.json)
+  当前默认聚合参数
+- [adapters/weixin/index.ts](/Users/zhoudi/Projects/GitHub/ClaudeAssistant-migrate-weixin/adapters/weixin/index.ts)
+  适配器异步投递入站消息，避免阻塞后续轮询
+
+从架构角度看，这套方案的核心思想可以概括成一句话：
+
+**Adapter 负责尽快把消息送进来，Gateway 负责把一轮消息尽量攒完整，再调用 Claude。**
+
+### 3.5 Session Profile（会话配置）
 
 ```typescript
 /**
@@ -219,7 +435,7 @@ interface SessionProfile {
 }
 ```
 
-### 3.5 Session Orchestrator 接口
+### 3.6 Session Orchestrator 接口
 
 ```typescript
 /**

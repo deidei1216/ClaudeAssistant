@@ -66,6 +66,12 @@ interface PersistedWeixinState {
   channels?: Record<string, WeixinChannelState>;
 }
 
+interface WeixinAccountLock {
+  pid?: number;
+  accountId?: string;
+  acquiredAt?: string;
+}
+
 type FetchLike = typeof fetch;
 
 const DEFAULT_BASE_URL = 'https://ilinkai.weixin.qq.com/';
@@ -79,6 +85,7 @@ const DEFAULT_CDN_BASE_URL = 'https://novac2c.cdn.weixin.qq.com/c2c';
 const DEFAULT_STATE_FILE = join('data', 'adapters', 'weixin-state.json');
 const DEFAULT_LOCK_DIRECTORY = join('data', 'adapters', 'weixin-locks');
 const RECENT_MESSAGE_TTL_MS = 15 * 60_000;
+const DEFAULT_HEALTHCHECK_INTERVAL_MS = 5_000;
 
 function detectImageType(buffer: Buffer): { extension: string; mime: string } {
   if (buffer.length >= 8 && buffer.subarray(0, 8).equals(Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]))) {
@@ -121,9 +128,13 @@ export class WeixinAdapter implements ChannelAdapter {
   private readonly channelStates = new Map<string, WeixinChannelState>();
   private readonly cursors = new Map<string, string>();
   private readonly pollTasks = new Map<string, Promise<void>>();
+  private readonly inboundDispatchTasks = new Set<Promise<void>>();
+  private readonly lockRetryTimers = new Map<string, NodeJS.Timeout>();
+  private maintenanceTimer?: NodeJS.Timeout;
   private readonly abortControllers = new Set<AbortController>();
   private readonly recentInboundMessages = new Map<string, number>();
   private readonly accountLockPaths = new Map<string, string>();
+  private readonly waitingForAccountLocks = new Set<string>();
 
   constructor(
     private readonly fetchImpl: FetchLike = fetch,
@@ -259,14 +270,10 @@ export class WeixinAdapter implements ChannelAdapter {
 
     const accounts = config.accounts ?? [];
     this.running = true;
+    this.startMaintenanceLoop(accounts);
 
     for (const account of accounts) {
-      if (!this.tryAcquireAccountLock(account.id)) {
-        continue;
-      }
-
-      const task = this.pollAccount(account);
-      this.pollTasks.set(account.id, task);
+      this.ensureAccountPolling(account);
     }
   }
 
@@ -277,13 +284,102 @@ export class WeixinAdapter implements ChannelAdapter {
       controller.abort();
     }
 
+    if (this.maintenanceTimer) {
+      clearInterval(this.maintenanceTimer);
+      this.maintenanceTimer = undefined;
+    }
+
+    for (const timer of this.lockRetryTimers.values()) {
+      clearTimeout(timer);
+    }
+
+    this.lockRetryTimers.clear();
     await Promise.allSettled(this.pollTasks.values());
     this.pollTasks.clear();
+    await Promise.allSettled(this.inboundDispatchTasks);
+    this.inboundDispatchTasks.clear();
     this.abortControllers.clear();
+    this.waitingForAccountLocks.clear();
 
     for (const accountId of this.accountLockPaths.keys()) {
       this.releaseAccountLock(accountId);
     }
+  }
+
+  private ensureAccountPolling(account: WeixinAccountConfig): void {
+    if (!this.running || this.pollTasks.has(account.id)) {
+      return;
+    }
+
+    this.clearAccountLockRetry(account.id);
+
+    if (!this.tryAcquireAccountLock(account.id)) {
+      this.scheduleAccountLockRetry(account);
+      return;
+    }
+
+    const task = this.pollAccount(account)
+      .catch((error) => {
+        if (!this.running) {
+          return;
+        }
+
+        this.log('error', 'Weixin account poll task exited unexpectedly', {
+          accountId: account.id,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      })
+      .finally(() => {
+        this.pollTasks.delete(account.id);
+
+        if (this.running) {
+          this.scheduleAccountLockRetry(account);
+        }
+      });
+
+    this.pollTasks.set(account.id, task);
+  }
+
+  private startMaintenanceLoop(accounts: WeixinAccountConfig[]): void {
+    if (this.maintenanceTimer) {
+      clearInterval(this.maintenanceTimer);
+    }
+
+    this.maintenanceTimer = setInterval(() => {
+      if (!this.running) {
+        return;
+      }
+
+      for (const account of accounts) {
+        this.ensureAccountPolling(account);
+      }
+    }, DEFAULT_HEALTHCHECK_INTERVAL_MS);
+  }
+
+  private scheduleAccountLockRetry(
+    account: WeixinAccountConfig,
+    delayMs = this.config?.retryDelayMs ?? DEFAULT_RETRY_DELAY_MS
+  ): void {
+    if (!this.running || this.pollTasks.has(account.id) || this.lockRetryTimers.has(account.id)) {
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      this.lockRetryTimers.delete(account.id);
+      this.ensureAccountPolling(account);
+    }, delayMs);
+
+    this.lockRetryTimers.set(account.id, timer);
+  }
+
+  private clearAccountLockRetry(accountId: string): void {
+    const timer = this.lockRetryTimers.get(accountId);
+    if (!timer) {
+      return;
+    }
+
+    clearTimeout(timer);
+    this.lockRetryTimers.delete(accountId);
   }
 
   private async pollAccount(account: WeixinAccountConfig): Promise<void> {
@@ -344,6 +440,15 @@ export class WeixinAdapter implements ChannelAdapter {
       return;
     }
 
+    this.log('info', 'Weixin inbound message received from getupdates', {
+      accountId: account.id,
+      messageId: message.message_id,
+      fromUserId: message.from_user_id,
+      createTimeMs: message.create_time_ms,
+      itemCount: message.item_list?.length ?? 0,
+      itemTypes: (message.item_list ?? []).map((item) => item.type)
+    });
+
     const dedupeKey = this.getInboundMessageKey(account.id, message);
     if (this.isDuplicateInboundMessage(dedupeKey)) {
       this.log('info', 'Skipping duplicate Weixin inbound message', {
@@ -363,7 +468,15 @@ export class WeixinAdapter implements ChannelAdapter {
     });
     this.persistState();
 
+    const attachmentExtractStartedAt = Date.now();
     const attachments = await this.extractInboundAttachments(account, channelId, message);
+    this.log('info', 'Weixin inbound attachment extraction finished', {
+      accountId: account.id,
+      channelId,
+      messageId: message.message_id,
+      attachmentCount: attachments.length,
+      durationMs: Date.now() - attachmentExtractStartedAt
+    });
     const omittedMediaTypes = attachments.some((attachment) => attachment.type.startsWith('image/')) ? [2] : [];
     const agentMessage = toAgentMessage(account.id, message, {
       omitMediaTypes: omittedMediaTypes,
@@ -377,7 +490,28 @@ export class WeixinAdapter implements ChannelAdapter {
       agentMessage.attachments = attachments;
     }
 
-    await this.callback?.(agentMessage);
+    this.dispatchInboundMessage(agentMessage);
+  }
+
+  private dispatchInboundMessage(message: AgentMessage): void {
+    if (!this.callback) {
+      return;
+    }
+
+    let task: Promise<void>;
+    task = this.callback(message)
+      .catch((error) => {
+        this.log('error', 'Weixin inbound message callback failed', {
+          channelId: message.channelId,
+          messageId: message.id,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      })
+      .finally(() => {
+        this.inboundDispatchTasks.delete(task);
+      });
+
+    this.inboundDispatchTasks.add(task);
   }
 
   private async getTypingTicket(
@@ -617,6 +751,7 @@ export class WeixinAdapter implements ChannelAdapter {
     }
 
     const aesKey = this.resolveInboundImageKey(item);
+    const downloadStartedAt = Date.now();
     const encrypted = await this.fetchBinary(this.resolveInboundMediaUrl(account, imageMedia), 'Weixin inbound image');
     const decrypted = aesKey ? this.decryptAttachment(encrypted, aesKey) : encrypted;
     const imageType = detectImageType(decrypted);
@@ -625,6 +760,16 @@ export class WeixinAdapter implements ChannelAdapter {
       id: `image-${message.message_id ?? index}-${index}`,
       name: fileName,
       data: decrypted
+    });
+
+    this.log('info', 'Weixin inbound image downloaded', {
+      accountId: account.id,
+      channelId,
+      messageId: message.message_id,
+      index,
+      fileName,
+      size: decrypted.length,
+      durationMs: Date.now() - downloadStartedAt
     });
 
     return {
@@ -878,26 +1023,35 @@ export class WeixinAdapter implements ChannelAdapter {
     const lockPath = resolve(lockDirectory, `${sanitizeLockSegment(accountId)}.lock`);
     mkdirSync(dirname(lockPath), { recursive: true });
 
-    try {
-      writeFileSync(
-        lockPath,
-        JSON.stringify({ pid: process.pid, accountId, acquiredAt: new Date().toISOString() }, null, 2),
-        { flag: 'wx' }
-      );
-      this.accountLockPaths.set(accountId, lockPath);
-      return true;
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code !== 'EEXIST') {
-        throw error;
+    if (this.writeAccountLock(lockPath, accountId)) {
+      if (this.waitingForAccountLocks.delete(accountId)) {
+        this.log('info', 'Acquired Weixin account lock after waiting', {
+          accountId,
+          lockPath
+        });
       }
+      return true;
+    }
 
-      this.log('warn', 'Skipping Weixin account because another gateway instance already holds the lock', {
+    if (this.recoverStaleAccountLock(lockPath, accountId) && this.writeAccountLock(lockPath, accountId)) {
+      if (this.waitingForAccountLocks.delete(accountId)) {
+        this.log('info', 'Acquired Weixin account lock after waiting', {
+          accountId,
+          lockPath
+        });
+      }
+      return true;
+    }
+
+    if (!this.waitingForAccountLocks.has(accountId)) {
+      this.waitingForAccountLocks.add(accountId);
+      this.log('warn', 'Waiting for Weixin account lock held by another gateway instance', {
         accountId,
         lockPath
       });
-      return false;
     }
+
+    return false;
   }
 
   private releaseAccountLock(accountId: string): void {
@@ -913,6 +1067,93 @@ export class WeixinAdapter implements ChannelAdapter {
     }
 
     this.accountLockPaths.delete(accountId);
+    this.waitingForAccountLocks.delete(accountId);
+  }
+
+  private writeAccountLock(lockPath: string, accountId: string): boolean {
+    try {
+      writeFileSync(
+        lockPath,
+        JSON.stringify({ pid: process.pid, accountId, acquiredAt: new Date().toISOString() }, null, 2),
+        { flag: 'wx' }
+      );
+      this.accountLockPaths.set(accountId, lockPath);
+      return true;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'EEXIST') {
+        return false;
+      }
+
+      throw error;
+    }
+  }
+
+  private recoverStaleAccountLock(lockPath: string, accountId: string): boolean {
+    const existingLock = this.readAccountLock(lockPath);
+
+    if (!existingLock || typeof existingLock.pid !== 'number' || existingLock.pid <= 0) {
+      this.removeStaleAccountLock(lockPath, accountId, existingLock, 'Lock file was unreadable or missing a valid pid');
+      return true;
+    }
+
+    if (existingLock.pid === process.pid) {
+      this.removeStaleAccountLock(lockPath, accountId, existingLock, 'Lock file belonged to the current process');
+      return true;
+    }
+
+    if (!this.isProcessAlive(existingLock.pid)) {
+      this.removeStaleAccountLock(lockPath, accountId, existingLock, `Lock owner pid ${existingLock.pid} is no longer running`);
+      return true;
+    }
+
+    return false;
+  }
+
+  private readAccountLock(lockPath: string): WeixinAccountLock | null {
+    try {
+      return JSON.parse(readFileSync(lockPath, 'utf8')) as WeixinAccountLock;
+    } catch {
+      return null;
+    }
+  }
+
+  private removeStaleAccountLock(
+    lockPath: string,
+    accountId: string,
+    existingLock: WeixinAccountLock | null,
+    reason: string
+  ): void {
+    try {
+      rmSync(lockPath, { force: true });
+    } catch {
+      return;
+    }
+
+    this.log('info', 'Recovered stale Weixin account lock', {
+      accountId,
+      lockPath,
+      reason,
+      existingLock
+    });
+  }
+
+  private isProcessAlive(pid: number): boolean {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code === 'ESRCH') {
+        return false;
+      }
+
+      if (code === 'EPERM') {
+        return true;
+      }
+
+      throw error;
+    }
   }
 
   private async sleep(ms: number): Promise<void> {

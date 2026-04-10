@@ -14,5 +14,9 @@
   "logging": {
     "level": "info",
     "file": "logs/gateway.log"
+  },
+  "aggregation": {
+    "quietWindowMs": 5000,
+    "maxWindowMs": 30000
   }
 }

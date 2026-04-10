@@ -18,13 +18,14 @@ Use this skill as the contract for deciding how generated files should leave the
 ## Runtime Entry
 
 The runtime hook entrypoint is `skills/file-return/file-return-stop.ts`. It wires the skill contract into the Stop hook without redefining the policy in `CLAUDE.md`.
-The Stop hook reads only manifest state. If the manifest primary is a directory, the hook packages that published entry into an archive before asking for a `[[file:...]]` marker.
+The Stop hook reads only manifest state. If the manifest primary is a directory, the hook packages that published entry into an archive before emitting the exact delivery handoff line the model must copy.
 
 ## Publish Contract
 
 - Work freely inside `workspace/`, but publish only the final delivery artifacts into `workspace/.deliveries/`.
 - Treat `.deliveries/manifest.json` as the explicit handoff boundary for delivery state.
 - Publish one file with `npx tsx scripts/delivery/publish-file.ts <source> [displayName]`.
+- Publish multiple standalone files for direct return by calling `publish-file.ts` for each one with `--multi`.
 - Publish one directory with `npx tsx scripts/delivery/publish-dir.ts <sourceDir> [name]`.
 - Package a published delivery entry with `npx tsx scripts/delivery/package-delivery.ts <sourcePath> [outputName]`.
 - Use `--primary` or `--no-primary` on the publish scripts when the manifest should or should not update the primary artifact.

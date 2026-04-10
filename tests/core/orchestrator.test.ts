@@ -95,7 +95,8 @@ describe('SessionOrchestrator', () => {
       expect(claudeMd).toContain('publish-file.ts" <source> [displayName]');
       expect(claudeMd).toContain('publish-dir.ts" <sourceDir> [name]');
       expect(claudeMd).toContain('package-delivery.ts" <sourcePath> [outputName]');
-      expect(claudeMd).toContain('If a published primary delivery is a directory, the Stop hook may package it into an archive before asking for the final [[file:...]] marker.');
+      expect(claudeMd).toContain('If a published primary delivery is a directory, the Stop hook may package it into an archive before the final delivery handoff.');
+      expect(claudeMd).toContain('and add --multi for each file instead of creating a zip.');
       expect(claudeMd).toContain('Do not return files directly from uploads/, the session root, or arbitrary workspace paths.');
       expect(response.content).toBe('hello from claude');
       expect(executor.execute).toHaveBeenCalledTimes(1);
@@ -262,7 +263,8 @@ describe('SessionOrchestrator', () => {
       expect(replacementClaudeMd).toContain('publish-file.ts" <source> [displayName]');
       expect(replacementClaudeMd).toContain('publish-dir.ts" <sourceDir> [name]');
       expect(replacementClaudeMd).toContain('package-delivery.ts" <sourcePath> [outputName]');
-      expect(replacementClaudeMd).toContain('If a published primary delivery is a directory, the Stop hook may package it into an archive before asking for the final [[file:...]] marker.');
+      expect(replacementClaudeMd).toContain('If a published primary delivery is a directory, the Stop hook may package it into an archive before the final delivery handoff.');
+      expect(replacementClaudeMd).toContain('and add --multi for each file instead of creating a zip.');
       expect(replacementClaudeMd).toContain('Do not return files directly from uploads/, the session root, or arbitrary workspace paths.');
     });
   });

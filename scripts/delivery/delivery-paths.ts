@@ -27,7 +27,7 @@ export function validateDeliveryRelativePath(value: string, label: string): stri
 }
 
 export function isCliFlag(value: string | undefined): boolean {
-  return value === '--primary' || value === '--no-primary';
+  return value === '--primary' || value === '--no-primary' || value === '--multi';
 }
 
 export function normalizeWorkspaceInputPath(value: string): string {

@@ -15,27 +15,54 @@ interface GatewayOptions {
   orchestrator: SessionOrchestrator & {
     registerRecentFiles?: SessionOrchestrator['registerRecentFiles'];
   };
+  aggregation?: {
+    quietWindowMs?: number;
+    maxWindowMs?: number;
+  };
   logger: {
     info: (data: unknown, message: string) => void;
     error: (data: unknown, message: string) => void;
   };
 }
 
+interface PendingInboundTurn {
+  adapter: ChannelAdapter;
+  turnKey: string;
+  channelKey: string;
+  messages: AgentMessage[];
+  quietTimer: NodeJS.Timeout;
+  maxTimer: NodeJS.Timeout;
+  startedAtMs: number;
+  lastBufferedAtMs: number;
+  completion: Promise<void>;
+  resolveCompletion: () => void;
+  rejectCompletion: (error?: unknown) => void;
+}
+
 export class AgentGateway {
   private static readonly TYPING_INTERVAL_MS = 8000;
+  private static readonly DEFAULT_QUIET_WINDOW_MS = 5000;
+  private static readonly DEFAULT_MAX_WINDOW_MS = 30000;
   private readonly channelQueues = new Map<string, Promise<void>>();
+  private readonly pendingInboundTurns = new Map<string, PendingInboundTurn>();
+  private readonly quietWindowMs: number;
+  private readonly maxWindowMs: number;
 
-  constructor(private readonly options: GatewayOptions) {}
+  constructor(private readonly options: GatewayOptions) {
+    this.quietWindowMs = options.aggregation?.quietWindowMs ?? AgentGateway.DEFAULT_QUIET_WINDOW_MS;
+    this.maxWindowMs = options.aggregation?.maxWindowMs ?? AgentGateway.DEFAULT_MAX_WINDOW_MS;
+  }
 
   async start(): Promise<void> {
     for (const adapter of this.options.adapters) {
       adapter.onMessage(async (message) => {
-        await this.processIncomingMessage(adapter, message);
+        await this.receiveIncomingMessage(adapter, message);
       });
     }
   }
 
   async stop(): Promise<void> {
+    await Promise.all([...this.pendingInboundTurns.keys()].map((turnKey) => this.flushPendingInboundTurn(turnKey, 'shutdown')));
     await Promise.all(this.options.adapters.map((adapter) => adapter.stop?.()));
   }
 
@@ -139,6 +166,183 @@ export class AgentGateway {
         this.options.logger.error(this.serializeError(message.channelId, sendError), 'Failed to send error message');
       }
     }
+  }
+
+  private async receiveIncomingMessage(adapter: ChannelAdapter, message: AgentMessage): Promise<void> {
+    const channelKey = this.toChannelKey(message);
+    const turnKey = this.toTurnKey(message);
+    const receivedAtMs = Date.now();
+
+    this.options.logger.info(
+      this.toInboundLogData(message, {
+        channelKey,
+        turnKey,
+        receivedAt: new Date(receivedAtMs).toISOString(),
+        quietWindowMs: this.quietWindowMs,
+        maxWindowMs: this.maxWindowMs
+      }),
+      'Inbound message arrived'
+    );
+
+    if (this.shouldBypassInboundCoalescing(message)) {
+      await this.flushPendingTurnsForChannel(channelKey, 'command_bypass');
+      await this.processIncomingMessage(adapter, message);
+      return;
+    }
+
+    const turn = this.pendingInboundTurns.get(turnKey) ?? this.createPendingInboundTurn(adapter, turnKey, channelKey);
+    turn.messages.push(message);
+    turn.lastBufferedAtMs = receivedAtMs;
+    clearTimeout(turn.quietTimer);
+    turn.quietTimer = this.scheduleTurnFlush(turnKey, this.quietWindowMs, 'quiet_window');
+
+    this.options.logger.info(
+      this.toInboundLogData(message, {
+        channelKey,
+        turnKey,
+        bufferedCount: turn.messages.length,
+        bufferedMessageIds: turn.messages.map((candidate) => candidate.id),
+        quietWindowMs: this.quietWindowMs,
+        maxWindowMs: this.maxWindowMs
+      }),
+      'Inbound turn buffered'
+    );
+
+    await turn.completion;
+  }
+
+  private createPendingInboundTurn(adapter: ChannelAdapter, turnKey: string, channelKey: string): PendingInboundTurn {
+    const now = Date.now();
+    let resolveCompletion: () => void = () => undefined;
+    let rejectCompletion: (error?: unknown) => void = () => undefined;
+    const completion = new Promise<void>((resolve, reject) => {
+      resolveCompletion = resolve;
+      rejectCompletion = reject;
+    });
+    const turn: PendingInboundTurn = {
+      adapter,
+      turnKey,
+      channelKey,
+      messages: [],
+      quietTimer: this.scheduleTurnFlush(turnKey, this.quietWindowMs, 'quiet_window'),
+      maxTimer: this.scheduleTurnFlush(turnKey, this.maxWindowMs, 'max_window'),
+      startedAtMs: now,
+      lastBufferedAtMs: now,
+      completion,
+      resolveCompletion,
+      rejectCompletion
+    };
+    this.pendingInboundTurns.set(turnKey, turn);
+    return turn;
+  }
+
+  private scheduleTurnFlush(turnKey: string, delayMs: number, reason: 'quiet_window' | 'max_window'): NodeJS.Timeout {
+    const timer = setTimeout(() => {
+      void this.flushPendingInboundTurn(turnKey, reason);
+    }, delayMs);
+    timer.unref?.();
+    return timer;
+  }
+
+  private async flushPendingTurnsForChannel(
+    channelKey: string,
+    reason: 'command_bypass' | 'shutdown'
+  ): Promise<void> {
+    const turnKeys = [...this.pendingInboundTurns.values()]
+      .filter((turn) => turn.channelKey === channelKey)
+      .map((turn) => turn.turnKey);
+
+    await Promise.all(turnKeys.map((turnKey) => this.flushPendingInboundTurn(turnKey, reason)));
+  }
+
+  private async flushPendingInboundTurn(
+    turnKey: string,
+    reason: 'quiet_window' | 'max_window' | 'command_bypass' | 'shutdown'
+  ): Promise<void> {
+    const turn = this.pendingInboundTurns.get(turnKey);
+    if (!turn) {
+      return;
+    }
+
+    this.pendingInboundTurns.delete(turnKey);
+    clearTimeout(turn.quietTimer);
+    clearTimeout(turn.maxTimer);
+
+    if (turn.messages.length === 0) {
+      turn.resolveCompletion();
+      return;
+    }
+
+    try {
+      const mergedMessage = this.mergeInboundMessages(turn.messages);
+      this.options.logger.info(
+        this.toInboundLogData(mergedMessage, {
+          channelKey: turn.channelKey,
+          turnKey,
+          flushReason: reason,
+          bufferedForMs: Date.now() - turn.startedAtMs,
+          quietForMs: Date.now() - turn.lastBufferedAtMs,
+          rawMessageIds: turn.messages.map((message) => message.id),
+          rawMessageTimestamps: turn.messages.map((message) => message.timestamp.toISOString()),
+          rawAttachmentCounts: turn.messages.map((message) => message.attachments?.length ?? 0),
+          mergedAttachmentCount: mergedMessage.attachments?.length ?? 0,
+          mergedContentPreview: mergedMessage.content.substring(0, 100)
+        }),
+        'Inbound turn flushed'
+      );
+      await this.processIncomingMessage(turn.adapter, mergedMessage);
+      turn.resolveCompletion();
+    } catch (error) {
+      turn.rejectCompletion(error);
+    }
+  }
+
+  private mergeInboundMessages(messages: AgentMessage[]): AgentMessage {
+    const ordered = [...messages].sort((left, right) => left.timestamp.getTime() - right.timestamp.getTime());
+    const lastMessage = ordered[ordered.length - 1] ?? messages[0];
+    const contentParts = ordered
+      .map((message) => message.content.trim())
+      .filter((content) => content.length > 0);
+    const attachments = ordered.flatMap((message) => message.attachments ?? []);
+
+    return {
+      ...lastMessage,
+      content: contentParts.join('\n\n').trim(),
+      attachments: attachments.length > 0 ? attachments : undefined,
+      metadata: {
+        ...(lastMessage.metadata ?? {}),
+        coalescedMessageIds: ordered.map((message) => message.id),
+        coalescedCount: ordered.length
+      }
+    };
+  }
+
+  private shouldBypassInboundCoalescing(message: AgentMessage): boolean {
+    return message.content.trim().startsWith('/');
+  }
+
+  private toChannelKey(message: Pick<AgentMessage, 'channelType' | 'channelId'>): string {
+    return `${message.channelType}:${message.channelId}`;
+  }
+
+  private toTurnKey(message: Pick<AgentMessage, 'channelType' | 'channelId' | 'userId'>): string {
+    return `${this.toChannelKey(message)}:${message.userId}`;
+  }
+
+  private toInboundLogData(
+    message: Pick<AgentMessage, 'id' | 'channelId' | 'channelType' | 'userId' | 'content' | 'attachments' | 'timestamp'>,
+    extras: Record<string, unknown> = {}
+  ): Record<string, unknown> {
+    return {
+      channelId: message.channelId,
+      channelType: message.channelType,
+      messageId: message.id,
+      userId: message.userId,
+      contentPreview: message.content.substring(0, 100),
+      attachmentCount: message.attachments?.length ?? 0,
+      messageTimestamp: message.timestamp.toISOString(),
+      ...extras
+    };
   }
 
   private async startTyping(adapter: ChannelAdapter, channelId: string): Promise<() => void> {

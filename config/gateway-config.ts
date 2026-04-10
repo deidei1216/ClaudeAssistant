@@ -45,6 +45,15 @@ const gatewayConfigSchema = z.object({
     .default({
       level: 'info',
       file: 'logs/gateway.log'
+    }),
+  aggregation: z
+    .object({
+      quietWindowMs: z.number().int().positive().default(5000),
+      maxWindowMs: z.number().int().positive().default(30000)
+    })
+    .default({
+      quietWindowMs: 5000,
+      maxWindowMs: 30000
     })
 });
 

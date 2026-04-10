@@ -62,7 +62,8 @@ describe('file-return stop hook e2e script helpers', () => {
         { kind: 'file', path: 'crop_左下.png', sourcePath: 'crop_左下.png', packaged: false },
         { kind: 'file', path: 'crop_右下.png', sourcePath: 'crop_右下.png', packaged: false }
       ],
-      primary: 'crop_右下.png'
+      primary: null,
+      handoff: ['crop_左上.png', 'crop_右上.png', 'crop_左下.png', 'crop_右下.png']
     });
   });
 
