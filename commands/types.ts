@@ -13,6 +13,8 @@ export interface CommandContext {
     updateSessionConfig: (sessionId: string, config: SessionConfigPatch) => SessionProfile;
     loadProfile: (profileName: string) => SessionProfileTemplate;
     getSession: (sessionId: string) => SessionProfile | null;
+    archiveSession?: (sessionId: string) => void;
+    getOrCreateSession?: (channelId: string, channelType: string) => SessionProfile;
   };
 }
 

@@ -12,10 +12,12 @@
     "start": "node dist/index.js",
     "test": "vitest run",
     "test:watch": "vitest watch",
+    "weixin:login": "tsx scripts/weixin/login.ts",
     "test:e2e:file-return": "tsx scripts/e2e/file-return-stop-hook.ts"
   },
   "dependencies": {
     "discord.js": "^14.22.1",
+    "docx": "^9.6.1",
     "dotenv": "^17.2.3",
     "pino": "^9.9.0",
     "zod": "^4.1.12"

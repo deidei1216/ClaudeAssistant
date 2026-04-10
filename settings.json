@@ -9,7 +9,7 @@
     "maxTriggersPerSession": 50
   },
   "enabledAdapters": [
-    "discord"
+    "weixin"
   ],
   "logging": {
     "level": "info",

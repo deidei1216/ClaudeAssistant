@@ -24,6 +24,12 @@ interface InboundAttachmentDownload {
   url: string;
 }
 
+interface InboundAttachmentBufferSave {
+  id: string;
+  name: string;
+  data: Buffer;
+}
+
 function resolveInboundInboxTarget(rootDirectory: string, sessionKey: string): string {
   const inboxRoot = join(realpathSync(resolve(rootDirectory)), '.claude-gateway', 'inbox');
   const targetDirectory = normalize(resolve(inboxRoot, sessionKey));
@@ -69,6 +75,22 @@ export async function downloadInboundAttachment(
 
   mkdirSync(targetDirectory, { recursive: true });
   writeFileSync(targetPath, Buffer.from(await response.arrayBuffer()));
+
+  return targetPath;
+}
+
+export function saveInboundAttachment(
+  rootDirectory: string,
+  sessionKey: string,
+  attachment: InboundAttachmentBufferSave
+): string {
+  const safeAttachmentId = sanitizeAttachmentName(attachment.id);
+  const safeFileName = sanitizeAttachmentName(attachment.name);
+  const targetDirectory = resolveInboundInboxTarget(rootDirectory, sessionKey);
+  const targetPath = join(targetDirectory, `${safeAttachmentId}-${safeFileName}`);
+
+  mkdirSync(targetDirectory, { recursive: true });
+  writeFileSync(targetPath, attachment.data);
 
   return targetPath;
 }

@@ -288,6 +288,38 @@ describe('CommandHandler', () => {
     });
   });
 
+  describe('/new command', () => {
+    it('archives the current session and creates a replacement session', async () => {
+      const session = createSession();
+      const message = createMessage('/new');
+      const orchestrator = {
+        updateSessionConfig: vi.fn(),
+        loadProfile: vi.fn(),
+        listSessions: vi.fn(),
+        getSession: vi.fn().mockReturnValue(session),
+        archiveSession: vi.fn(),
+        getOrCreateSession: vi.fn().mockReturnValue({
+          ...session,
+          id: 'session-2',
+          messageCount: 0
+        })
+      };
+      const handler = new CommandHandler();
+
+      buildBuiltInCommands(handler);
+      const result = await handler.executeFromMessage(message, {
+        session,
+        message,
+        orchestrator
+      });
+
+      expect(orchestrator.archiveSession).toHaveBeenCalledWith('session-1');
+      expect(orchestrator.getOrCreateSession).toHaveBeenCalledWith('channel-1', 'discord');
+      expect(result.success).toBe(true);
+      expect(result.message).toContain('new=session-2');
+    });
+  });
+
   describe('CommandHandler.register()', () => {
     it('registers a command', async () => {
       const handler = new CommandHandler();

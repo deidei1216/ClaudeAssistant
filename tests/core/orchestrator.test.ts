@@ -201,6 +201,17 @@ describe('SessionOrchestrator', () => {
       expect(refreshedClaudeMd).not.toBe('# stale session contract\n');
     });
 
+    it('creates a replacement session after the current one is archived', () => {
+      const first = orchestrator.getOrCreateSession('channel-1', 'discord');
+      orchestrator.archiveSession(first.id);
+
+      const second = orchestrator.getOrCreateSession('channel-1', 'discord');
+
+      expect(second.id).not.toBe(first.id);
+      expect(second.status).toBe('active');
+      expect(second.messageCount).toBe(0);
+    });
+
     it('recreates the Claude session and retries when resuming hits a corrupt JSON session error', async () => {
       const first = orchestrator.getOrCreateSession('channel-1', 'discord');
       store.save({

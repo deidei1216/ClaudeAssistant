@@ -1,0 +1,7 @@
+{
+  "enabled": true,
+  "channelVersion": "2.1.1",
+  "authFile": "data/adapters/weixin-auth.json",
+  "stateFile": "data/adapters/weixin-state.json",
+  "accounts": []
+}
