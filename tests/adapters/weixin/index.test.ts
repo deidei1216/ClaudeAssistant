@@ -1215,6 +1215,119 @@ describe('WeixinAdapter', () => {
     await adapter.disconnect();
   });
 
+  it('downloads inbound files as attachments instead of text placeholders', async () => {
+    const tempRoot = mkdtempSync(join(tmpdir(), 'weixin-adapter-file-'));
+    tempDirectories.push(tempRoot);
+
+    const pdfBytes = Buffer.from('%PDF-1.4\n1 0 obj\n<<>>\nendobj\n', 'utf8');
+    const aesKey = Buffer.from('fedcba98765432100123456789abcdef', 'hex');
+    const cipher = createCipheriv('aes-128-ecb', aesKey, null);
+    cipher.setAutoPadding(true);
+    const encryptedPdf = Buffer.concat([cipher.update(pdfBytes), cipher.final()]);
+
+    let getUpdatesCalls = 0;
+    const fetchMock = vi.fn(async (input: URL | string, init?: RequestInit) => {
+      const url = String(input);
+
+      if (url.endsWith('/ilink/bot/getupdates')) {
+        getUpdatesCalls += 1;
+        if (getUpdatesCalls === 1) {
+          return {
+            ok: true,
+            status: 200,
+            text: async () =>
+              JSON.stringify({
+                ret: 0,
+                msgs: [
+                  {
+                    message_id: 601,
+                    from_user_id: 'user-6@im.wechat',
+                    to_user_id: 'bot-1@im.wechat',
+                    create_time_ms: Date.parse('2026-04-10T00:20:00.000Z'),
+                    context_token: 'ctx-file',
+                    message_type: 1,
+                    item_list: [
+                      {
+                        type: 4,
+                        file_item: {
+                          file_name: 'meeting-notes.pdf',
+                          media: {
+                            full_url: 'https://cdn.weixin.example/download/file-1',
+                            aes_key: Buffer.from(aesKey.toString('hex'), 'utf8').toString('base64')
+                          }
+                        }
+                      }
+                    ]
+                  }
+                ],
+                get_updates_buf: 'cursor-file'
+              })
+          } as Response;
+        }
+
+        return new Promise<Response>((_, reject) => {
+          init?.signal?.addEventListener(
+            'abort',
+            () => reject(createAbortError()),
+            { once: true }
+          );
+        });
+      }
+
+      if (url === 'https://cdn.weixin.example/download/file-1') {
+        return {
+          ok: true,
+          status: 200,
+          arrayBuffer: async () => encryptedPdf.buffer.slice(
+            encryptedPdf.byteOffset,
+            encryptedPdf.byteOffset + encryptedPdf.byteLength
+          ),
+          text: async () => ''
+        } as Response;
+      }
+
+      throw new Error(`Unexpected request: ${url}`);
+    });
+
+    const adapter = new WeixinAdapter(fetchMock as never);
+    const inboundMessages: Array<{ content: string; attachment?: string; attachmentType?: string; attachmentName?: string }> = [];
+
+    await adapter.initialize({
+      enabled: true,
+      rootDirectory: tempRoot,
+      accounts: [
+        {
+          id: 'acct-1',
+          token: 'token-1',
+          ilinkUserId: 'bot-1@im.wechat'
+        }
+      ]
+    });
+    adapter.onMessage(async (message) => {
+      inboundMessages.push({
+        content: message.content,
+        attachment: message.attachments?.[0]?.localPath,
+        attachmentType: message.attachments?.[0]?.type,
+        attachmentName: message.attachments?.[0]?.name
+      });
+    });
+
+    await adapter.connect();
+    await vi.waitFor(() => {
+      expect(inboundMessages).toEqual([
+        {
+          content: '',
+          attachment: expect.stringContaining(`${tempRoot}/.claude-gateway/inbox/acct-1:user-6@im.wechat/`),
+          attachmentType: 'application/pdf',
+          attachmentName: 'meeting-notes.pdf'
+        }
+      ]);
+    });
+    expect(readFileSync(inboundMessages[0].attachment ?? '')).toEqual(pdfBytes);
+
+    await adapter.disconnect();
+  });
+
   it('recovers a stale account lock when the recorded pid is no longer running', async () => {
     const tempRoot = mkdtempSync(join(tmpdir(), 'weixin-adapter-lock-'));
     tempDirectories.push(tempRoot);
