@@ -1,5 +1,5 @@
 import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from 'node:crypto';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, extname, join, resolve } from 'node:path';
 import { existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import type { AdapterConfig, ChannelAdapter, SendMessageOptions, SendMessageResult } from '../../core/adapter';
 import type { AgentMessage, Attachment } from '../../core/types';
@@ -112,6 +112,47 @@ function detectImageType(buffer: Buffer): { extension: string; mime: string } {
   }
 
   return { extension: 'bin', mime: 'application/octet-stream' };
+}
+
+function detectMimeTypeFromFileName(fileName: string): string {
+  switch (extname(fileName).toLowerCase()) {
+    case '.pdf':
+      return 'application/pdf';
+    case '.txt':
+      return 'text/plain';
+    case '.md':
+      return 'text/markdown';
+    case '.json':
+      return 'application/json';
+    case '.csv':
+      return 'text/csv';
+    case '.doc':
+      return 'application/msword';
+    case '.docx':
+      return 'application/vnd.openxmlformats-officedocument.wordprocessingml.document';
+    case '.xls':
+      return 'application/vnd.ms-excel';
+    case '.xlsx':
+      return 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet';
+    case '.ppt':
+      return 'application/vnd.ms-powerpoint';
+    case '.pptx':
+      return 'application/vnd.openxmlformats-officedocument.presentationml.presentation';
+    case '.zip':
+      return 'application/zip';
+    case '.png':
+      return 'image/png';
+    case '.jpg':
+    case '.jpeg':
+      return 'image/jpeg';
+    default:
+      return 'application/octet-stream';
+  }
+}
+
+interface ExtractedInboundAttachment {
+  attachment: Attachment;
+  sourceType: number;
 }
 
 function sanitizeLockSegment(value: string): string {
@@ -469,7 +510,8 @@ export class WeixinAdapter implements ChannelAdapter {
     this.persistState();
 
     const attachmentExtractStartedAt = Date.now();
-    const attachments = await this.extractInboundAttachments(account, channelId, message);
+    const extractedAttachments = await this.extractInboundAttachments(account, channelId, message);
+    const attachments = extractedAttachments.map((entry) => entry.attachment);
     this.log('info', 'Weixin inbound attachment extraction finished', {
       accountId: account.id,
       channelId,
@@ -477,7 +519,7 @@ export class WeixinAdapter implements ChannelAdapter {
       attachmentCount: attachments.length,
       durationMs: Date.now() - attachmentExtractStartedAt
     });
-    const omittedMediaTypes = attachments.some((attachment) => attachment.type.startsWith('image/')) ? [2] : [];
+    const omittedMediaTypes = [...new Set(extractedAttachments.map((entry) => entry.sourceType))];
     const agentMessage = toAgentMessage(account.id, message, {
       omitMediaTypes: omittedMediaTypes,
       allowEmptyContent: attachments.length > 0
@@ -714,22 +756,33 @@ export class WeixinAdapter implements ChannelAdapter {
     account: WeixinAccountConfig,
     channelId: string,
     message: WeixinInboundMessage
-  ): Promise<Attachment[]> {
-    const attachments: Attachment[] = [];
+  ): Promise<ExtractedInboundAttachment[]> {
+    const attachments: ExtractedInboundAttachment[] = [];
 
     for (const [index, item] of (message.item_list ?? []).entries()) {
-      if (item.type !== 2 || !item.image_item?.media) {
-        continue;
-      }
-
       try {
-        const image = await this.downloadInboundImage(account, channelId, item, message, index);
-        attachments.push(image);
+        if (item.type === 2 && item.image_item?.media) {
+          const image = await this.downloadInboundImage(account, channelId, item, message, index);
+          attachments.push({
+            attachment: image,
+            sourceType: 2
+          });
+          continue;
+        }
+
+        if (item.type === 4 && item.file_item?.media) {
+          const file = await this.downloadInboundFile(account, channelId, item, message, index);
+          attachments.push({
+            attachment: file,
+            sourceType: 4
+          });
+        }
       } catch (error) {
-        this.log('warn', 'Failed to download Weixin inbound image', {
+        this.log('warn', 'Failed to download Weixin inbound attachment', {
           accountId: account.id,
           channelId,
           messageId: message.message_id,
+          itemType: item.type,
           error: error instanceof Error ? error.message : String(error)
         });
       }
@@ -782,12 +835,59 @@ export class WeixinAdapter implements ChannelAdapter {
     };
   }
 
-  private resolveInboundImageKey(item: WeixinMessageItem): Buffer | undefined {
-    if (item.image_item?.aeskey?.trim()) {
-      return Buffer.from(item.image_item.aeskey.trim(), 'hex');
+  private async downloadInboundFile(
+    account: WeixinAccountConfig,
+    channelId: string,
+    item: WeixinMessageItem,
+    message: WeixinInboundMessage,
+    index: number
+  ): Promise<Attachment> {
+    const fileMedia = item.file_item?.media;
+    if (!fileMedia) {
+      throw new Error('File media payload is missing.');
     }
 
-    const base64Key = item.image_item?.media?.aes_key?.trim();
+    const aesKey = this.resolveInboundMediaKey(item.file_item?.aeskey, item.file_item?.media?.aes_key);
+    const downloadStartedAt = Date.now();
+    const encrypted = await this.fetchBinary(this.resolveInboundMediaUrl(account, fileMedia), 'Weixin inbound file');
+    const decrypted = aesKey ? this.decryptAttachment(encrypted, aesKey) : encrypted;
+    const fileName = item.file_item?.file_name?.trim() || `weixin-file-${message.message_id ?? index}.bin`;
+    const localPath = saveInboundAttachment(this.config?.rootDirectory ?? process.cwd(), channelId, {
+      id: `file-${message.message_id ?? index}-${index}`,
+      name: fileName,
+      data: decrypted
+    });
+
+    this.log('info', 'Weixin inbound file downloaded', {
+      accountId: account.id,
+      channelId,
+      messageId: message.message_id,
+      index,
+      fileName,
+      size: decrypted.length,
+      durationMs: Date.now() - downloadStartedAt
+    });
+
+    return {
+      id: `weixin:file:${message.message_id ?? index}:${index}`,
+      name: fileName,
+      type: detectMimeTypeFromFileName(fileName),
+      size: decrypted.length,
+      url: localPath,
+      localPath
+    };
+  }
+
+  private resolveInboundImageKey(item: WeixinMessageItem): Buffer | undefined {
+    return this.resolveInboundMediaKey(item.image_item?.aeskey, item.image_item?.media?.aes_key);
+  }
+
+  private resolveInboundMediaKey(explicitHexKey?: string, encodedMediaKey?: string): Buffer | undefined {
+    if (explicitHexKey?.trim()) {
+      return Buffer.from(explicitHexKey.trim(), 'hex');
+    }
+
+    const base64Key = encodedMediaKey?.trim();
     if (!base64Key) {
       return undefined;
     }

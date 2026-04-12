@@ -15,10 +15,19 @@ export interface WeixinImageItem {
   aeskey?: string;
 }
 
+export interface WeixinFileItem {
+  media?: WeixinCdnMedia;
+  aeskey?: string;
+  file_name?: string;
+  len?: string;
+  md5?: string;
+}
+
 export interface WeixinMessageItem {
   type?: number;
   text_item?: WeixinTextItem;
   image_item?: WeixinImageItem;
+  file_item?: WeixinFileItem;
 }
 
 export interface WeixinInboundMessage {
